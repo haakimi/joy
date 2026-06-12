@@ -4,7 +4,13 @@ import SlashPicker from "./SlashPicker.js";
 import { LogView, type LogItem } from "./LogView.js";
 import { getTheme } from "./theme/theme.js";
 import { useGitBranch } from "./hooks/useGitBranch.js";
+import {
+  getTabAction,
+  finishPendingTool,
+  nextCwdAfterCommand,
+} from "./appState.js";
 import { runAgent, type AgentEvent } from "../agent.js";
+import type { ProviderMessage, ProviderName } from "../providers/types.js";
 import type { SkillMeta } from "../skills.js";
 import {
   SLASH_COMMANDS,
@@ -14,6 +20,7 @@ import {
 } from "../commands.js";
 
 export interface AppProps {
+  initialProvider: ProviderName;
   initialModel: string;
   skills: SkillMeta[];
 }
@@ -21,21 +28,23 @@ export interface AppProps {
 let nextId = 0;
 const mkId = () => `i${++nextId}`;
 
-const makeBanner = (model: string, skillCount: number, cwd: string): LogItem => ({
+const makeBanner = (provider: ProviderName, model: string, skillCount: number, cwd: string): LogItem => ({
   kind: "banner",
+  provider,
   model,
   skillCount,
   cwd,
   id: mkId(),
 });
 
-export default function App({ initialModel, skills }: AppProps) {
+export default function App({ initialProvider, initialModel, skills }: AppProps) {
   const { exit } = useApp();
+  const [provider] = useState(initialProvider);
   const [model, setModel] = useState(initialModel);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [items, setItems] = useState<LogItem[]>(() => [
-    makeBanner(initialModel, skills.length, process.cwd()),
+    makeBanner(initialProvider, initialModel, skills.length, process.cwd()),
   ]);
   const [pickerIdx, setPickerIdx] = useState(0);
   const [cwd, setCwd] = useState(process.cwd());
@@ -43,6 +52,13 @@ export default function App({ initialModel, skills }: AppProps) {
   const [tokOut, setTokOut] = useState(0);
   const branch = useGitBranch(cwd);
   const theme = getTheme();
+
+  // State to keep the conversation history
+  const [messages, setMessages] = useState<ProviderMessage[]>([]);
+  // State to handle aborting the current agent run
+  const abortControllerRef = useRef<AbortController | null>(null);
+  // NEW: State to keep track of expanded items
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
   const itemsRef = useRef(items);
   itemsRef.current = items;
@@ -100,6 +116,19 @@ export default function App({ initialModel, skills }: AppProps) {
     setPickerIdx(0);
   }, [matches.length, slashMode]);
 
+  // NEW: Toggle expand/collapse for items
+  const toggleExpand = (id: string) => {
+    setExpandedItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
   useInput((char, key) => {
     if (handleKey(char, key)) return;
     if (key.return) {
@@ -113,8 +142,22 @@ export default function App({ initialModel, skills }: AppProps) {
     }
   });
 
+  // NEW: Add keyboard shortcuts for expand/collapse
   const handleKey = (_input: string, key: any): boolean => {
-    if (busy) return false;
+    if (key.tab) {
+      const lastTool = [...itemsRef.current].reverse().find((it) => it.kind === "tool");
+      const action = getTabAction({
+        slashMode,
+        matches,
+        pickerIdx,
+        input,
+        hasExpandableTool: Boolean(lastTool),
+      });
+      if (!action.handled) return false;
+      if ("input" in action) setInput(action.input);
+      else if (lastTool) toggleExpand(lastTool.id);
+      return true;
+    }
     if (!slashMode || matches.length === 0) return false;
     if (key.upArrow) {
       setPickerIdx((i) => (i - 1 + matches.length) % matches.length);
@@ -122,11 +165,6 @@ export default function App({ initialModel, skills }: AppProps) {
     }
     if (key.downArrow) {
       setPickerIdx((i) => (i + 1) % matches.length);
-      return true;
-    }
-    if (key.tab) {
-      const pick = matches[pickerIdx] ?? matches[0];
-      if (pick) setInput("/" + pick.name + " ");
       return true;
     }
     if (key.escape) {
@@ -149,7 +187,19 @@ export default function App({ initialModel, skills }: AppProps) {
       exit();
       return;
     }
-    await runTurn(line);
+
+    // If busy, abort the current run first
+    if (busy && abortControllerRef.current) {
+      append({ kind: "info", text: "⏹️ Interrupting current task..." });
+      abortControllerRef.current.abort();
+      // We'll continue with the new user input after the abort completes
+      // We need to wait a bit for the current run to clean up
+      setTimeout(() => {
+        runTurn(line);
+      }, 100);
+    } else {
+      await runTurn(line);
+    }
   };
 
   async function handleSlash(line: string) {
@@ -173,80 +223,76 @@ export default function App({ initialModel, skills }: AppProps) {
     }
 
     if (cmd.name === "clear") {
-      const banner = makeBanner(model, skills.length, process.cwd());
+      const banner = makeBanner(provider, model, skills.length, process.cwd());
       itemsRef.current = [banner];
       setItems(itemsRef.current);
       setTokIn(0);
       setTokOut(0);
+      // Clear conversation history and expanded items
+      setMessages([]);
+      setExpandedItems(new Set());
       return;
     }
     if (cmd.name === "exit" || cmd.name === "quit") {
       exit();
       return;
     }
-
-    const beforeCwd = process.cwd();
-    const ctx: CommandContext = {
-      args,
-      raw: args.join(" "),
-      cwd: beforeCwd,
-      model,
-      printLine: (msg) => append({ kind: "info", text: stripAnsi(msg) }),
-    };
-    let result;
-    try {
-      result = await cmd.run(ctx);
-    } catch (err: any) {
-      append({ kind: "error", text: err?.message ?? String(err) });
+    if (cmd.name === "model") {
+      if (args[0]) {
+        setModel(args[0]);
+        append({ kind: "info", text: `model set to ${args[0]}` });
+      } else {
+        append({ kind: "info", text: `current model: ${model}` });
+      }
       return;
     }
 
-    if (process.env.JOY_MODEL && process.env.JOY_MODEL !== model) {
-      setModel(process.env.JOY_MODEL);
+    const printLine = (msg: string) => append({ kind: "info", text: stripAnsi(msg) });
+    const beforeCwd = process.cwd();
+    const result = await cmd.run({ args, raw: body, cwd, model, printLine });
+    const afterCwd = process.cwd();
+    if (afterCwd !== beforeCwd) {
+      setCwd(nextCwdAfterCommand(cwd, afterCwd));
     }
-    if (process.cwd() !== beforeCwd) setCwd(process.cwd());
-    if (result?.prompt) await runTurn(result.prompt);
+    if (result.clear) {
+      const banner = makeBanner(provider, model, skills.length, process.cwd());
+      itemsRef.current = [banner];
+      setItems(itemsRef.current);
+    }
+    if (result.exit) {
+      exit();
+    }
+    if (result.prompt) {
+      await runTurn(result.prompt);
+    }
   }
 
-  async function runTurn(prompt: string) {
-    // Handle compact requests: the agent's response will be the summary
-    const isCompactRequest = prompt.startsWith("[COMPACT]");
-    if (isCompactRequest) {
-      compactRef.current = true;
-    }
+  async function runTurn(userText: string) {
+    append({ kind: "user", text: userText, id: mkId() });
 
-    append({ kind: "user", text: prompt, ts: Date.now() });
-    setBusy(true);
     const pendingToolIds = new Map<string, string>();
+    setBusy(true);
+
+    // Create a new abort controller for this run
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
-      await runAgent(prompt, {
+      await runAgent(userText, {
+        providerName: provider,
         model,
         skills,
+        signal: abortController.signal,
+        // Pass the saved messages to continue the conversation
+        initialMessages: messages,
         onEvent: (e: AgentEvent) => {
           switch (e.type) {
-            case "iteration":
-              append({ kind: "turn", n: e.n, model, ts: Date.now() });
-              break;
-            case "skills_loaded":
-              break;
             case "assistant_text":
-              if (!e.isThinking) completeLatestPlan();
-              if (compactRef.current) {
-                // The agent's response to [COMPACT] is the summary
-                compactRef.current = false;
-                append({
-                  kind: "compact",
-                  summary: e.text,
-                  savedTokens: 0, // Will be estimated
-                  id: mkId(),
-                });
-              } else {
-                append({
-                  kind: "assistant",
-                  text: e.text,
-                  isThinking: e.isThinking ?? false,
-                });
-              }
+              append({
+                kind: "assistant",
+                text: e.text,
+                isThinking: e.isThinking ?? false,
+              });
               break;
             case "tool_call": {
               const id = mkId();
@@ -262,7 +308,7 @@ export default function App({ initialModel, skills }: AppProps) {
               break;
             }
             case "tool_result": {
-              const id = pendingToolIds.get(e.id);
+              const id = finishPendingTool(pendingToolIds, e.id);
               if (id) {
                 updateTool(id, {
                   pending: false,
@@ -270,7 +316,6 @@ export default function App({ initialModel, skills }: AppProps) {
                   isError: e.is_error,
                   finishedAt: Date.now(),
                 });
-                pendingToolIds.delete(e.id);
               }
               break;
             }
@@ -287,6 +332,10 @@ export default function App({ initialModel, skills }: AppProps) {
                 tokIn: e.tokIn,
                 tokOut: e.tokOut,
               });
+              // Save the conversation history for next time
+              if ((e as any)._fullMessages) {
+                setMessages((e as any)._fullMessages);
+              }
               break;
             case "stop":
               if (e.reason === "max_tokens") {
@@ -339,24 +388,32 @@ export default function App({ initialModel, skills }: AppProps) {
         },
         onCompact: (summary: string, _tokensSaved: number) => {
           // Replace conversation history with the compressed summary
-          return [
+          const newMessages = [
             {
               role: "user" as const,
               content: `[CONVERSATION HISTORY SUMMARY]\n\n${summary}\n\n---\nThe conversation above has been compressed. Continue working based on this summary.`,
             },
           ];
+          setMessages(newMessages);
+          return newMessages;
         },
       });
     } catch (err: any) {
-      append({ kind: "error", text: err?.message ?? String(err) });
+      // If it's an abort, show a nicer message
+      if (err?.message === "Aborted") {
+        append({ kind: "info", text: "Task interrupted." });
+      } else {
+        append({ kind: "error", text: err?.message ?? String(err) });
+      }
     } finally {
       setBusy(false);
+      abortControllerRef.current = null;
     }
   }
 
   return (
     <Box flexDirection="column">
-      <LogView items={items} />
+      <LogView items={items} expandedItems={expandedItems} onToggleExpand={toggleExpand} />
 
       {slashMode && matches.length > 0 && (
         <Box>
@@ -366,10 +423,10 @@ export default function App({ initialModel, skills }: AppProps) {
 
       <Box flexDirection="row" marginTop={1}>
         <Box marginRight={1}>
-          <Text color={busy ? theme.fgMuted : theme.fg} bold>|</Text>
+          <Text color={busy ? theme.fg : theme.fg} bold>|</Text>
         </Box>
         <Box flexGrow={1}>
-          <Text color={busy ? theme.fgMuted : theme.fg}>
+          <Text color={busy ? theme.fg : theme.fg}>
             {input}
             {!busy && <Text color={theme.fgMuted}>|</Text>}
           </Text>
@@ -380,8 +437,8 @@ export default function App({ initialModel, skills }: AppProps) {
         <Text color={theme.fgFaint}>
           {shrinkPath(cwd)}
           {branch ? ` ⎇ ${branch}` : ""}
-          {" · "}{model}
-          {busy ? " · thinking" : ""}
+          {" · "}{provider}:{model}
+          {busy ? " · [Press Enter to interrupt]" : " · [Tab to toggle expand]"}
           {tokIn > 0 ? ` · ↑${fmtTok(tokIn)} ↓${fmtTok(tokOut)}` : ""}
         </Text>
       </Box>

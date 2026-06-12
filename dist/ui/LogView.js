@@ -22,11 +22,11 @@ function clampLines(s, maxLines) {
         total: lines.length,
     };
 }
-export const LogView = React.memo(function LogView({ items }) {
+export const LogView = React.memo(function LogView({ items, expandedItems = new Set(), onToggleExpand, }) {
     const theme = getTheme();
-    return (_jsx(Box, { flexDirection: "column", children: items.map((it) => (_jsx(LogRow, { item: it, theme: theme }, it.id))) }));
+    return (_jsx(Box, { flexDirection: "column", children: items.map((it) => (_jsx(LogRow, { item: it, theme: theme, expanded: expandedItems.has(it.id), onToggleExpand: onToggleExpand }, it.id))) }));
 });
-export function LogRow({ item, theme }) {
+export function LogRow({ item, theme, expanded = false, onToggleExpand, }) {
     switch (item.kind) {
         case "turn":
             return _jsx(TurnHeader, { n: item.n, model: item.model, ts: item.ts, theme: theme });
@@ -39,7 +39,7 @@ export function LogRow({ item, theme }) {
         case "assistant":
             return (_jsx(Card, { label: item.isThinking ? "joy · thinking" : "joy", icon: item.isThinking ? "*" : ">", labelColor: theme.assistant, theme: theme, children: _jsx(MessageBody, { text: item.text, theme: theme, muted: item.isThinking }) }));
         case "tool":
-            return _jsx(ToolRow, { item: item, theme: theme });
+            return (_jsx(ToolRow, { item: item, theme: theme, expanded: expanded, onToggleExpand: onToggleExpand }));
         case "info":
             return (_jsx(Box, { children: _jsxs(Text, { color: theme.fgMuted, children: ["  ", item.text] }) }));
         case "error":
@@ -57,7 +57,7 @@ export function LogRow({ item, theme }) {
     }
 }
 function BannerRow({ item, theme }) {
-    return (_jsxs(Box, { flexDirection: "column", marginBottom: 1, children: [_jsx(Box, { flexDirection: "column", children: JOY_BANNER.map((line, index) => (_jsx(Text, { color: theme.accent, bold: true, children: line }, index))) }), _jsxs(Box, { children: [_jsx(Text, { color: theme.fgMuted, children: "joy" }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", item.model] }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", item.skillCount, " skills"] }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", shrinkCwd(item.cwd)] })] }), _jsx(Box, { children: _jsx(Text, { color: theme.fgFaint, children: "type / for commands \u00B7 enter to chat" }) })] }));
+    return (_jsxs(Box, { flexDirection: "column", marginBottom: 1, children: [_jsx(Box, { flexDirection: "column", children: JOY_BANNER.map((line, index) => (_jsx(Text, { color: theme.accent, bold: true, children: line }, index))) }), _jsxs(Box, { children: [_jsx(Text, { color: theme.fgMuted, children: "joy" }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", item.provider ? `${item.provider}:${item.model}` : item.model] }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", item.skillCount, " skills"] }), _jsxs(Text, { color: theme.fgMuted, children: [" \u00B7 ", shrinkCwd(item.cwd)] })] }), _jsx(Box, { children: _jsx(Text, { color: theme.fgFaint, children: "type / for commands \u00B7 enter to chat" }) })] }));
 }
 function MessageBody({ text, theme, muted = false, }) {
     if (muted) {
@@ -100,7 +100,7 @@ function tsLabel(ts) {
     const mm = String(d.getMinutes()).padStart(2, "0");
     return `${hh}:${mm}`;
 }
-function ToolRow({ item, theme, }) {
+function ToolRow({ item, theme, expanded = false, onToggleExpand, }) {
     const display = describeToolCall(item.name, item.input);
     const isBash = item.name === "bash";
     const dur = !item.pending && item.finishedAt && item.startedAt
@@ -128,9 +128,10 @@ function ToolRow({ item, theme, }) {
         const code = exitInfo?.exit === 0 ? "" : exitInfo?.exit !== undefined ? ` exit ${exitInfo.exit}` : "";
         badge = (_jsxs(Text, { color: theme.success, bold: true, children: ["done", code] }));
     }
-    return (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { children: [_jsxs(Text, { color: theme.tool, bold: true, children: ["> ", item.name] }), dur && (_jsxs(_Fragment, { children: [_jsx(Text, { color: theme.fgMuted, children: "  \u00B7  " }), _jsx(Text, { color: theme.fgMuted, children: dur })] })), _jsx(Text, { color: theme.fgMuted, children: "  \u00B7  " }), badge] }), _jsxs(Box, { paddingLeft: 2, children: [display.headline ? (_jsx(Text, { color: theme.fg, children: display.headline })) : null, display.detail && (_jsxs(Text, { color: theme.fgFaint, children: ["  (", display.detail, ")"] })), display.rawJson && !display.headline && (_jsx(Text, { color: theme.fgMuted, children: display.rawJson }))] }), !item.pending && bodyForRender && bodyForRender.trim() && (_jsx(OutputPanel, { body: bodyForRender, isError: !!item.isError, theme: theme }))] }));
+    return (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { children: [_jsxs(Text, { color: theme.tool, bold: true, children: ["> ", item.name] }), dur && (_jsxs(_Fragment, { children: [_jsx(Text, { color: theme.fgMuted, children: "  \u00B7  " }), _jsx(Text, { color: theme.fgMuted, children: dur })] })), _jsx(Text, { color: theme.fgMuted, children: "  \u00B7  " }), badge] }), _jsxs(Box, { paddingLeft: 2, children: [display.headline ? (_jsx(Text, { color: theme.fg, children: display.headline })) : null, display.detail && (_jsxs(Text, { color: theme.fgFaint, children: ["  (", display.detail, ")"] })), display.rawJson && !display.headline && (_jsx(Text, { color: theme.fgMuted, children: display.rawJson }))] }), !item.pending && bodyForRender && bodyForRender.trim() && (_jsx(OutputPanel, { body: bodyForRender, isError: !!item.isError, theme: theme, expanded: expanded, onToggleExpand: onToggleExpand ? () => onToggleExpand(item.id) : undefined }))] }));
 }
-function OutputPanel({ body, isError, theme, }) {
-    const { body: shown, hidden, total } = clampLines(body, MAX_OUTPUT_LINES);
-    return (_jsxs(Box, { paddingLeft: 2, flexDirection: "column", children: [shown.split("\n").map((line, i) => (_jsx(Text, { color: isError ? theme.failure : theme.fgMuted, children: line || " " }, i))), hidden > 0 && (_jsxs(Text, { color: theme.fgFaint, children: ["- ", hidden, " more lines -"] }))] }));
+function OutputPanel({ body, isError, theme, expanded = false, onToggleExpand, }) {
+    const { body: shown, hidden } = clampLines(body, MAX_OUTPUT_LINES);
+    const displayBody = expanded ? body : shown;
+    return (_jsxs(Box, { paddingLeft: 2, flexDirection: "column", children: [displayBody.split("\n").map((line, i) => (_jsx(Text, { color: isError ? theme.failure : theme.fgMuted, children: line || " " }, i))), hidden > 0 && (_jsx(Text, { color: theme.fgFaint, children: expanded ? "- collapse -" : `- ${hidden} more lines -` }))] }));
 }

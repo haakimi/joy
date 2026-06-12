@@ -59,6 +59,7 @@ function defaultOnEvent(e) {
     }
 }
 export async function startRepl(opts) {
+    let provider = opts.provider;
     let model = opts.model;
     const skills = opts.skills;
     const completer = (line) => {
@@ -82,7 +83,7 @@ export async function startRepl(opts) {
             setImmediate(() => maybeSuggest(rl));
         });
     }
-    printBanner(model, skills.length);
+    printBanner(provider, model, skills.length);
     rl.prompt();
     for await (const rawLine of rl) {
         const line = rawLine.trim();
@@ -102,14 +103,14 @@ export async function startRepl(opts) {
                 model = process.env.JOY_MODEL;
             }
             if (result.prompt) {
-                await runOnce(result.prompt, model, skills);
+                await runOnce(result.prompt, provider, model, skills);
             }
             stdout.write("\n");
             rl.prompt();
             continue;
         }
         try {
-            await runOnce(line, model, skills);
+            await runOnce(line, provider, model, skills);
         }
         catch (err) {
             console.error(`${C.red}error:${C.reset} ${err?.message ?? err}`);
@@ -119,12 +120,13 @@ export async function startRepl(opts) {
     }
     rl.close();
 }
-function printBanner(model, skillCount) {
-    stdout.write(`${C.dim}tools: read, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${model}${C.reset}\n`);
+function printBanner(provider, model, skillCount) {
+    stdout.write(`${C.dim}tools: read, list_files, glob, grep, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`);
     stdout.write(`${C.dim}type ${C.reset}${C.cyan}/${C.reset}${C.dim} for commands, ${C.reset}${C.cyan}Tab${C.reset}${C.dim} to complete, ${C.reset}${C.cyan}/exit${C.reset}${C.dim} to quit${C.reset}\n\n`);
 }
-async function runOnce(prompt, model, skills) {
+async function runOnce(prompt, provider, model, skills) {
     await runAgent(prompt, {
+        providerName: provider,
         model,
         skills,
         onEvent: defaultOnEvent,

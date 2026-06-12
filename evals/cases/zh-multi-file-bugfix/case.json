@@ -1,0 +1,55 @@
+{
+  "name": "zh-multi-file-bugfix",
+  "prompt": "请修复这个小项目，让 node main.js 输出 12。",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "math.js": "export function multiply(a, b) {\n  return a + b;\n}\n",
+    "main.js": "import { multiply } from './math.js';\nconsole.log(multiply(3, 4));\n",
+    "package.json": "{\n  \"type\": \"module\"\n}\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_read_math",
+          "name": "read",
+          "input": {
+            "path": "math.js"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_edit_math",
+          "name": "edit",
+          "input": {
+            "path": "math.js",
+            "old_string": "return a + b;",
+            "new_string": "return a * b;"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [
+        { "type": "text", "text": "已修复 multiply 函数，现在 node main.js 会输出 12。" }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "node main.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "12"
+  }
+}

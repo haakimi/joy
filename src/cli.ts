@@ -4,6 +4,9 @@ import { stdin, stdout } from "node:process";
 import React from "react";
 import { runAgent, type AgentEvent } from "./agent.js";
 import { resolveConfig, writeUserConfig } from "./config.js";
+import { runEvalCli, parseEvalArgs } from "./evalCli.js";
+import { createProvider, defaultModelForProvider, tokenRequiredForProvider } from "./providers/index.js";
+import type { ProviderName } from "./providers/types.js";
 import { discoverSkills, DEFAULT_SKILL_ROOTS } from "./skills.js";
 import { startRepl } from "./repl.js";
 
@@ -70,12 +73,17 @@ ${C.bold}Usage${C.reset}
   joy "<prompt>"            Run a single prompt and exit
   joy config                Configure API token / base URL / model
   joy doctor                Show current config and run a tiny API ping
+  joy eval [case]           Run local eval cases
+  joy eval --list           List eval case names
+  joy eval --json           Print machine-readable eval results
+  joy eval --provider mock  Override case provider
+  joy eval --keep-runs      Keep passing run directories
   joy skills                List skills discovered from local skill roots
   joy --no-tui              Use the plain readline REPL (no Ink)
   joy --help                Show this help
 
 ${C.bold}Config search order${C.reset}
-  1. Environment variables (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, JOY_MODEL)
+  1. Environment variables (JOY_PROVIDER, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, JOY_MODEL)
   2. ~/.joy-agent/config.json
   3. ~/.claude/settings.json, ~/.config/claude/settings.json
   4. ~/Library/Application Support/{Claude,CiciSwitch}/...
@@ -87,64 +95,85 @@ ${C.bold}Skill search order${C.reset}
 In the TUI: type "/" to open the slash picker, ↑/↓ to navigate, Tab to complete.`);
 }
 
+function normalizeProvider(value: string): ProviderName {
+  const v = value.toLowerCase();
+  return v === "mock" || v === "glm" || v === "anthropic" ? v : "anthropic";
+}
+
 async function setupWizard() {
   const rl = createInterface({ input: stdin, output: stdout });
   console.log(`${C.bold}joy setup${C.reset}\n`);
+  const provider = normalizeProvider(
+    (await rl.question(
+      `Provider ${C.dim}[anthropic/mock/glm] [anthropic]${C.reset}: `,
+    )).trim() || "anthropic",
+  );
   const baseURL =
     (await rl.question(
-      `API base URL ${C.dim}[http://127.0.0.1:15721]${C.reset}: `,
-    )).trim() || "http://127.0.0.1:15721";
-  const authToken = (await rl.question(`Auth token: `)).trim();
+      `API base URL ${C.dim}[provider default]${C.reset}: `,
+    )).trim() || undefined;
+  const authToken = (await rl.question(`Auth token ${C.dim}[blank allowed for mock/glm]${C.reset}: `)).trim();
   const model =
     (await rl.question(
-      `Model name ${C.dim}[claude-sonnet-4-6]${C.reset}: `,
-    )).trim() || "claude-sonnet-4-6";
+      `Model name ${C.dim}[${defaultModelForProvider(provider)}]${C.reset}: `,
+    )).trim() || defaultModelForProvider(provider);
   rl.close();
 
-  if (!authToken) {
-    console.error(`${C.red}error:${C.reset} Auth token is required.`);
+  if (tokenRequiredForProvider(provider) && !authToken) {
+    console.error(`${C.red}error:${C.reset} Auth token is required for provider '${provider}'.`);
     process.exit(1);
   }
+  if (provider === "glm") {
+    console.log(`${C.dim}note: GLM support is reserved and does not call a real GLM API yet.${C.reset}`);
+  }
 
-  const file = await writeUserConfig({ authToken, baseURL, model });
+  const file = await writeUserConfig({
+    provider,
+    ...(authToken ? { authToken } : {}),
+    ...(baseURL ? { baseURL } : {}),
+    model,
+  });
   console.log(`\n${C.green}✓${C.reset} Saved config to ${file}`);
 }
 
 async function doctor() {
   const cfg = await resolveConfig();
   console.log(`${C.bold}joy doctor${C.reset}`);
-  console.log(`  base URL : ${cfg.baseURL || "(default Anthropic)"}`);
-  console.log(`  model    : ${cfg.model || "(default)"}`);
-  console.log(`  token    : ${cfg.authToken ? "set" : C.red + "MISSING" + C.reset}`);
+  console.log(`  provider : ${cfg.provider}`);
+  console.log(`  base URL : ${cfg.baseURL || "(provider default)"}`);
+  console.log(`  model    : ${cfg.model || defaultModelForProvider(cfg.provider)}`);
+  console.log(`  token    : ${cfg.authToken ? "set" : tokenRequiredForProvider(cfg.provider) ? C.red + "MISSING" + C.reset : "not required"}`);
   console.log(`  sources  : ${cfg.source.join(", ") || "(none)"}`);
 
   const skills = await discoverSkills(cfg.skillRoots);
   console.log(`  skills   : ${skills.length} found`);
 
-  if (!cfg.authToken) {
+  if (tokenRequiredForProvider(cfg.provider) && !cfg.authToken) {
     console.log(`\nRun ${C.cyan}joy config${C.reset} to set up.`);
     return;
   }
 
-  process.env.ANTHROPIC_AUTH_TOKEN = cfg.authToken;
+  if (cfg.authToken) process.env.ANTHROPIC_AUTH_TOKEN = cfg.authToken;
   if (cfg.baseURL) process.env.ANTHROPIC_BASE_URL = cfg.baseURL;
 
   try {
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    const client = new Anthropic({
-      apiKey: cfg.authToken,
-      baseURL: cfg.baseURL,
-    });
-    const r = await client.messages.create({
-      model: cfg.model || "claude-sonnet-4-6",
-      max_tokens: 16,
+    const provider = createProvider(cfg);
+    if (cfg.provider === "glm") {
+      console.log(`\n${C.green}✓${C.reset} GLM provider is reserved/skeleton; no GLM network call was attempted.`);
+      return;
+    }
+    const r = await provider.createMessage({
+      model: cfg.model || defaultModelForProvider(cfg.provider),
+      maxTokens: 16,
+      system: "",
+      tools: [],
       messages: [{ role: "user", content: "reply with the single word: ok" }],
     });
     const txt = r.content
       .filter((b) => b.type === "text")
-      .map((b: any) => b.text)
+      .map((b) => b.text)
       .join("");
-    console.log(`\n${C.green}✓${C.reset} API reachable. Response: ${txt.trim() || "(empty)"}`);
+    console.log(`\n${C.green}✓${C.reset} Provider check succeeded. Response: ${txt.trim() || "(empty)"}`);
   } catch (err: any) {
     console.log(`\n${C.red}✗${C.reset} API error: ${err?.message ?? err}`);
     process.exit(1);
@@ -179,6 +208,7 @@ function extraRootsFromEnv(cfgRoots: string[] = []): string[] {
 }
 
 async function launchTui(opts: {
+  provider: ProviderName;
   model: string;
   skills: Awaited<ReturnType<typeof discoverSkills>>;
 }) {
@@ -189,7 +219,7 @@ async function launchTui(opts: {
     import("./ui/App.js"),
   ]);
   const { waitUntilExit } = render(
-    React.createElement(App, { initialModel: opts.model, skills: opts.skills }),
+    React.createElement(App, { initialProvider: opts.provider, initialModel: opts.model, skills: opts.skills }),
   );
   await waitUntilExit();
 }
@@ -216,6 +246,10 @@ async function main() {
     await doctor();
     return;
   }
+  if (first === "eval") {
+    const exitCode = await runEvalCli(parseEvalArgs(filtered.slice(1)));
+    process.exit(exitCode);
+  }
   if (first === "skills") {
     const cfg = await resolveConfig();
     await listSkills(extraRootsFromEnv(cfg.skillRoots));
@@ -223,20 +257,18 @@ async function main() {
   }
 
   const cfg = await resolveConfig();
-  if (!cfg.authToken) {
+  if (tokenRequiredForProvider(cfg.provider) && !cfg.authToken) {
     console.error(
-      `${C.red}error:${C.reset} No API token found.\n` +
+      `${C.red}error:${C.reset} No API token found for provider '${cfg.provider}'.\n` +
         `  Run ${C.cyan}joy config${C.reset} to save one,\n` +
         `  or export ANTHROPIC_AUTH_TOKEN in your shell.`,
     );
     process.exit(1);
   }
 
-  const model =
-    cfg.model ||
-    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
-    "claude-sonnet-4-6";
-  process.env.ANTHROPIC_AUTH_TOKEN = cfg.authToken;
+  const provider = cfg.provider;
+  const model = cfg.model || defaultModelForProvider(provider);
+  if (cfg.authToken) process.env.ANTHROPIC_AUTH_TOKEN = cfg.authToken;
   if (cfg.baseURL) process.env.ANTHROPIC_BASE_URL = cfg.baseURL;
 
   const extraRoots = extraRootsFromEnv(cfg.skillRoots);
@@ -245,15 +277,15 @@ async function main() {
   const inlinePrompt = filtered.join(" ").trim();
   if (inlinePrompt) {
     // Single-shot mode always uses plain output (script-friendly)
-    await runAgent(inlinePrompt, { model, onEvent: plainOnEvent, skills });
+    await runAgent(inlinePrompt, { providerName: provider, model, onEvent: plainOnEvent, skills });
     return;
   }
 
   const isTty = Boolean(stdout.isTTY && stdin.isTTY);
   if (useTui && isTty) {
-    await launchTui({ model, skills });
+    await launchTui({ provider, model, skills });
   } else {
-    await startRepl({ model, skills, skillsExtraRoots: extraRoots });
+    await startRepl({ provider, model, skills, skillsExtraRoots: extraRoots });
   }
 }
 

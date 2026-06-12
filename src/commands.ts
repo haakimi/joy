@@ -90,10 +90,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "List built-in tools the agent can call",
     run: async ({ printLine }) => {
       printLine(`${C.bold}Built-in tools${C.reset}`);
-      printLine(`  ${C.cyan}read${C.reset}   ${C.dim}read a file${C.reset}`);
-      printLine(`  ${C.cyan}write${C.reset}  ${C.dim}create/overwrite a file${C.reset}`);
-      printLine(`  ${C.cyan}edit${C.reset}   ${C.dim}replace exact text in a file${C.reset}`);
-      printLine(`  ${C.cyan}bash${C.reset}   ${C.dim}run a shell command (bash -lc)${C.reset}`);
+      printLine(`  ${C.cyan}read${C.reset}        ${C.dim}read a file${C.reset}`);
+      printLine(`  ${C.cyan}list_files${C.reset}  ${C.dim}list directory contents${C.reset}`);
+      printLine(`  ${C.cyan}glob${C.reset}        ${C.dim}find files by glob pattern${C.reset}`);
+      printLine(`  ${C.cyan}grep${C.reset}        ${C.dim}search text with regex${C.reset}`);
+      printLine(`  ${C.cyan}write${C.reset}       ${C.dim}create/overwrite a file${C.reset}`);
+      printLine(`  ${C.cyan}edit${C.reset}        ${C.dim}replace exact text in a file${C.reset}`);
+      printLine(`  ${C.cyan}bash${C.reset}        ${C.dim}run a shell command (bash -lc)${C.reset}`);
       return {};
     },
   },

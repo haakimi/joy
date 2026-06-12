@@ -1,0 +1,39 @@
+{
+  "name": "zh-single-file-bugfix",
+  "prompt": "请修复 calc.js，让 add(2, 3) 输出 5。只需要修改代码。",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "calc.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_edit_calc",
+          "name": "edit",
+          "input": {
+            "path": "calc.js",
+            "old_string": "return a - b;",
+            "new_string": "return a + b;"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [
+        { "type": "text", "text": "修复完成，add 函数现在正确返回两数之和。" }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "node calc.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "5"
+  }
+}

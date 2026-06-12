@@ -1,12 +1,16 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { tools, runTool, setSubagentRunner, setToolEventEmitter } from "./tools.js";
 import { discoverSkills, buildSkillsPrompt, type SkillMeta } from "./skills.js";
+import { createProvider } from "./providers/index.js";
+import type { ModelProvider, ProviderMessage, ProviderName, ProviderToolResultBlock } from "./providers/types.js";
 
 const BASE_SYSTEM_PROMPT = `You are Joy, a terminal coding agent.
-You have seven tools: read, write, edit, bash, update_plan, spawn_agent, wait_agent.
-Use them to inspect and modify the user's project. Prefer 'edit' over 'write'
-for small changes. Read a file before editing it. When using 'bash', keep
-commands short and non-interactive.
+You have local tools for reading files, listing files, globbing paths, grepping text,
+writing/editing files, running bash commands, planning, and spawning/waiting for
+sub-agents. Use list_files to inspect directories, glob to find files by path
+pattern, and grep to search file contents. Prefer these search tools over bash
+for basic code discovery because their output is capped and easier to read.
+Prefer 'edit' over 'write' for small changes. Read a file before editing it.
+When using 'bash', keep commands short and non-interactive.
 
 Before starting any non-trivial task, use the update_plan tool to create a todo
 list of steps. This helps you stay organized and lets the user see your plan.
@@ -24,8 +28,10 @@ Work in small steps. After you finish the user's request, send a final assistant
 message (without any tool calls) summarizing what you did.`;
 
 const SUBAGENT_SYSTEM_PROMPT = `You are a Joy sub-agent working on a specific subtask.
-You have the same tools as the main agent: read, write, edit, bash, update_plan.
-Focus ONLY on the task you were given. Do not spawn additional sub-agents.
+You have local tools for reading files, listing files, globbing paths, grepping text,
+writing/editing files, running bash commands, and planning. Use list_files, glob,
+and grep for code discovery. Focus ONLY on the task you were given. Do not spawn
+additional sub-agents.
 
 When you finish, provide a clear summary of what you did: files changed, key
 decisions, and any issues encountered. Be concise.`;
@@ -38,11 +44,19 @@ export interface AgentOptions {
   skills?: SkillMeta[];
   skillsExtraRoots?: string[];
   /** Called when the agent compresses context. Return new messages to continue. */
-  onCompact?: (summary: string, tokensSaved: number) => Anthropic.MessageParam[];
+  onCompact?: (summary: string, tokensSaved: number) => ProviderMessage[];
   /** Internal: true when this agent is a sub-agent. */
   isSubagent?: boolean;
   /** Internal: sub-agent ID for event routing. */
   subagentId?: string;
+  /** Initial conversation messages to continue from. */
+  initialMessages?: ProviderMessage[];
+  /** Provider to use when creating the model backend. */
+  providerName?: ProviderName;
+  /** Internal: override provider for tests. */
+  provider?: ModelProvider;
+  /** Signal to abort the agent. */
+  signal?: AbortSignal;
 }
 
 export type AgentEvent =
@@ -104,25 +118,32 @@ const COMPACT_SUMMARY_PROMPT = `Provide a detailed summary of the conversation s
 Be thorough but concise. This summary will replace the full conversation history
 to save context space. The agent will continue working from this summary.`;
 
+export function collectSubagentText(events: AgentEvent[]): string {
+  const parts = events
+    .filter((e): e is Extract<AgentEvent, { type: "assistant_text" }> =>
+      e.type === "assistant_text" && !e.isThinking && e.text.trim().length > 0,
+    )
+    .map((e) => e.text);
+  return parts.length > 0 ? parts.join("\n\n") : "(sub-agent completed with no output)";
+}
+
 // Wire up the sub-agent runner (called once at startup)
 setSubagentRunner(async (prompt: string, opts: any) => {
   // Sub-agents don't emit events to the main UI; we capture the result
-  let result = "";
+  const events: AgentEvent[] = [];
   await runAgent(prompt, {
     ...opts,
     onEvent: (e: AgentEvent) => {
-      if (e.type === "assistant_text" && !e.isThinking) {
-        result = e.text;
-      }
+      events.push(e);
     },
   });
-  return result || "(sub-agent completed with no output)";
+  return collectSubagentText(events);
 });
 
 async function compressConversation(
-  client: Anthropic,
+  provider: ModelProvider,
   model: string,
-  messages: Anthropic.MessageParam[],
+  messages: ProviderMessage[],
   system: string,
 ): Promise<{ summary: string; tokensSaved: number }> {
   // Estimate tokens before compression (rough: ~4 chars per token)
@@ -132,39 +153,38 @@ async function compressConversation(
   );
   const estimatedTokens = Math.round(totalChars / 4);
 
-  const resp = await client.messages.create({
+  const resp = await provider.createMessage({
     model,
-    max_tokens: 4096,
-    system,
-    messages: [
-      ...messages,
-      { role: "user", content: COMPACT_SUMMARY_PROMPT },
-    ],
+    maxTokens: 4096,
+    system: `${system}\n\n${COMPACT_SUMMARY_PROMPT}`,
+    tools: [],
+    messages,
   });
-
   const summary = resp.content
     .filter((b) => b.type === "text")
-    .map((b: any) => b.text)
-    .join("\n");
-
-  // Estimate tokens saved (original minus summary)
-  const summaryChars = summary.length;
-  const summaryTokens = Math.round(summaryChars / 4);
-  const tokensSaved = Math.max(0, estimatedTokens - summaryTokens);
-
-  return { summary, tokensSaved };
+    .map((b) => b.text)
+    .join("");
+  const tokensSaved = estimatedTokens - Math.round(summary.length / 4);
+  return { summary, tokensSaved: Math.max(0, tokensSaved) };
 }
 
 export async function runAgent(
   userPrompt: string,
   opts: AgentOptions,
 ): Promise<string> {
-  const client = new Anthropic({
-    apiKey: process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY,
-    baseURL: process.env.ANTHROPIC_BASE_URL,
-  });
+  const cfg = await import("./config.js");
+  const config = await cfg.resolveConfig();
+  const emit = opts.onEvent ?? (() => { });
+  const signal = opts.signal;
 
-  const emit = opts.onEvent ?? (() => {});
+  const providerName = opts.providerName ?? config.provider;
+  const provider = opts.provider ?? createProvider({ ...config, provider: providerName });
+
+  // Check if already aborted
+  if (signal?.aborted) {
+    throw new Error("Aborted");
+  }
+
   setToolEventEmitter(emit as any);
   const skills =
     opts.skills ?? (await discoverSkills(opts.skillsExtraRoots ?? []));
@@ -184,9 +204,18 @@ export async function runAgent(
 
   const maxTokensDefault = Number(process.env.JOY_MAX_TOKENS) || 16_384;
 
-  let messages: Anthropic.MessageParam[] = [
-    { role: "user", content: userPrompt },
-  ];
+  let messages: ProviderMessage[] = opts.initialMessages ? [...opts.initialMessages] : [];
+
+  // Add the new user prompt if it's not empty
+  if (userPrompt.trim()) {
+    messages.push({ role: "user", content: userPrompt });
+  }
+
+  // If no messages at all (edge case), add a placeholder
+  if (messages.length === 0) {
+    messages.push({ role: "user", content: "Hello" });
+  }
+
   let lastAssistantText = "";
   const maxIters = opts.maxIterations ?? 25;
   let cumulativeInput = 0;
@@ -198,17 +227,28 @@ export async function runAgent(
 
     emit({ type: "iteration", n: i });
 
-    const resp = await client.messages.create({
+    // Check for abort before each API call
+    if (signal?.aborted) {
+      throw new Error("Aborted");
+    }
+
+    const resp = await provider.createMessage({
       model: opts.model,
-      max_tokens: opts.maxTokens ?? maxTokensDefault,
+      maxTokens: opts.maxTokens ?? maxTokensDefault,
       system,
       tools,
       messages,
+      signal,
     });
 
-    const usage: any = (resp as any).usage ?? {};
-    const inT = Number(usage.input_tokens ?? 0);
-    const outT = Number(usage.output_tokens ?? 0);
+    // Check abort after API call returns
+    if (signal?.aborted) {
+      throw new Error("Aborted");
+    }
+
+
+    const inT = resp.usage.inputTokens;
+    const outT = resp.usage.outputTokens;
     cumulativeInput += inT;
     cumulativeOutput += outT;
     emit({
@@ -223,7 +263,7 @@ export async function runAgent(
     const compactThreshold = Number(process.env.JOY_COMPACT_THRESHOLD) || 180_000;
     if (cumulativeInput > compactThreshold && opts.onCompact) {
       const { summary, tokensSaved } = await compressConversation(
-        client,
+        provider,
         opts.model,
         messages,
         system,
@@ -236,7 +276,7 @@ export async function runAgent(
 
     messages.push({ role: "assistant", content: resp.content });
 
-    const reason = resp.stop_reason ?? "end_turn";
+    const reason = resp.stopReason;
     const returnedToolIds = new Set<string>();
 
     for (const block of resp.content) {
@@ -272,7 +312,7 @@ export async function runAgent(
               "Some tool calls may have been cut off. Do NOT retry the exact same tool call — " +
               "instead, complete your thought more concisely or break the work into smaller steps. " +
               "If you were writing a large file, use 'write' with only the meaningful content needed.",
-          } as Anthropic.TextBlockParam,
+          },
         ],
       });
       continue;
@@ -282,6 +322,11 @@ export async function runAgent(
       emit({
         type: "turnEnd",
         n: i,
+        // Also return the full messages array so the caller can continue the conversation
+        // We add this as an extra field to the event for the TUI to pick up
+        // (Note: we can't modify the AgentEvent type for backward compatibility, but we can
+        // include it as an extra property for the TUI)
+        ...({ _fullMessages: messages } as any),
         tools: toolsThisTurn,
         durationMs: Date.now() - turnStart,
         tokIn: cumulativeInput,
@@ -291,11 +336,17 @@ export async function runAgent(
     }
 
     const toolUses = resp.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+      (b): b is Extract<typeof b, { type: "tool_use" }> => b.type === "tool_use",
     );
 
-    const results: Anthropic.ToolResultBlockParam[] = [];
+    const results: ProviderToolResultBlock[] = [];
     for (const tu of toolUses) {
+      // Check abort before running each tool
+      if (signal?.aborted) {
+        throw new Error("Aborted");
+      }
+
+
       const toolInput =
         tu.input && typeof tu.input === "object" && !Array.isArray(tu.input)
           ? (tu.input as Record<string, unknown>)
@@ -326,6 +377,8 @@ export async function runAgent(
     emit({
       type: "turnEnd",
       n: i,
+      // Also return the full messages array
+      ...({ _fullMessages: messages } as any),
       tools: toolsThisTurn,
       durationMs: Date.now() - turnStart,
       tokIn: cumulativeInput,

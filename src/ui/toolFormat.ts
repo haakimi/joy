@@ -31,6 +31,29 @@ export function describeToolCall(
       if (path) return { headline: `📖 ${path}`, detail, outputPanel: "content" };
       break;
     }
+    case "list_files": {
+      const target = String(obj?.path ?? ".");
+      const detail = [obj?.recursive ? "recursive" : undefined, obj?.max_entries ? `max ${obj.max_entries}` : undefined]
+        .filter(Boolean)
+        .join(" · ") || undefined;
+      return { headline: `📁 ${target}`, detail, outputPanel: "content" };
+    }
+    case "glob": {
+      const pattern = String(obj?.pattern ?? "");
+      const detail = [obj?.path ? `in ${obj.path}` : undefined, obj?.max_matches ? `max ${obj.max_matches}` : undefined]
+        .filter(Boolean)
+        .join(" · ") || undefined;
+      if (pattern) return { headline: `🔎 ${pattern}`, detail, outputPanel: "content" };
+      break;
+    }
+    case "grep": {
+      const pattern = String(obj?.pattern ?? "");
+      const detail = [obj?.path ? `in ${obj.path}` : undefined, obj?.include ? `include ${obj.include}` : undefined]
+        .filter(Boolean)
+        .join(" · ") || undefined;
+      if (pattern) return { headline: `grep /${pattern}/`, detail, outputPanel: "content" };
+      break;
+    }
     case "write": {
       const path = String(obj?.path ?? "");
       const content = String(obj?.content ?? "");

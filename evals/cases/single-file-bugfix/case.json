@@ -1,0 +1,39 @@
+{
+  "name": "single-file-bugfix",
+  "prompt": "Fix add.js so add(2, 3) prints 5.",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_edit",
+          "name": "edit",
+          "input": {
+            "path": "add.js",
+            "old_string": "return a - b;",
+            "new_string": "return a + b;"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [
+        { "type": "text", "text": "Fixed add.js." }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "node add.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "5"
+  }
+}

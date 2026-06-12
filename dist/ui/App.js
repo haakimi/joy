@@ -5,24 +5,27 @@ import SlashPicker from "./SlashPicker.js";
 import { LogView } from "./LogView.js";
 import { getTheme } from "./theme/theme.js";
 import { useGitBranch } from "./hooks/useGitBranch.js";
+import { getTabAction, finishPendingTool, nextCwdAfterCommand, } from "./appState.js";
 import { runAgent } from "../agent.js";
 import { SLASH_COMMANDS, findCommand, matchCommands, } from "../commands.js";
 let nextId = 0;
 const mkId = () => `i${++nextId}`;
-const makeBanner = (model, skillCount, cwd) => ({
+const makeBanner = (provider, model, skillCount, cwd) => ({
     kind: "banner",
+    provider,
     model,
     skillCount,
     cwd,
     id: mkId(),
 });
-export default function App({ initialModel, skills }) {
+export default function App({ initialProvider, initialModel, skills }) {
     const { exit } = useApp();
+    const [provider] = useState(initialProvider);
     const [model, setModel] = useState(initialModel);
     const [input, setInput] = useState("");
     const [busy, setBusy] = useState(false);
     const [items, setItems] = useState(() => [
-        makeBanner(initialModel, skills.length, process.cwd()),
+        makeBanner(initialProvider, initialModel, skills.length, process.cwd()),
     ]);
     const [pickerIdx, setPickerIdx] = useState(0);
     const [cwd, setCwd] = useState(process.cwd());
@@ -30,6 +33,12 @@ export default function App({ initialModel, skills }) {
     const [tokOut, setTokOut] = useState(0);
     const branch = useGitBranch(cwd);
     const theme = getTheme();
+    // State to keep the conversation history
+    const [messages, setMessages] = useState([]);
+    // State to handle aborting the current agent run
+    const abortControllerRef = useRef(null);
+    // NEW: State to keep track of expanded items
+    const [expandedItems, setExpandedItems] = useState(new Set());
     const itemsRef = useRef(items);
     itemsRef.current = items;
     const compactRef = useRef(false);
@@ -71,6 +80,19 @@ export default function App({ initialModel, skills }) {
     useEffect(() => {
         setPickerIdx(0);
     }, [matches.length, slashMode]);
+    // NEW: Toggle expand/collapse for items
+    const toggleExpand = (id) => {
+        setExpandedItems((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) {
+                next.delete(id);
+            }
+            else {
+                next.add(id);
+            }
+            return next;
+        });
+    };
     useInput((char, key) => {
         if (handleKey(char, key))
             return;
@@ -86,9 +108,25 @@ export default function App({ initialModel, skills }) {
             setInput(input + char);
         }
     });
+    // NEW: Add keyboard shortcuts for expand/collapse
     const handleKey = (_input, key) => {
-        if (busy)
-            return false;
+        if (key.tab) {
+            const lastTool = [...itemsRef.current].reverse().find((it) => it.kind === "tool");
+            const action = getTabAction({
+                slashMode,
+                matches,
+                pickerIdx,
+                input,
+                hasExpandableTool: Boolean(lastTool),
+            });
+            if (!action.handled)
+                return false;
+            if ("input" in action)
+                setInput(action.input);
+            else if (lastTool)
+                toggleExpand(lastTool.id);
+            return true;
+        }
         if (!slashMode || matches.length === 0)
             return false;
         if (key.upArrow) {
@@ -97,12 +135,6 @@ export default function App({ initialModel, skills }) {
         }
         if (key.downArrow) {
             setPickerIdx((i) => (i + 1) % matches.length);
-            return true;
-        }
-        if (key.tab) {
-            const pick = matches[pickerIdx] ?? matches[0];
-            if (pick)
-                setInput("/" + pick.name + " ");
             return true;
         }
         if (key.escape) {
@@ -124,7 +156,19 @@ export default function App({ initialModel, skills }) {
             exit();
             return;
         }
-        await runTurn(line);
+        // If busy, abort the current run first
+        if (busy && abortControllerRef.current) {
+            append({ kind: "info", text: "⏹️ Interrupting current task..." });
+            abortControllerRef.current.abort();
+            // We'll continue with the new user input after the abort completes
+            // We need to wait a bit for the current run to clean up
+            setTimeout(() => {
+                runTurn(line);
+            }, 100);
+        }
+        else {
+            await runTurn(line);
+        }
     };
     async function handleSlash(line) {
         const body = line.slice(1).trim();
@@ -148,81 +192,72 @@ export default function App({ initialModel, skills }) {
             return;
         }
         if (cmd.name === "clear") {
-            const banner = makeBanner(model, skills.length, process.cwd());
+            const banner = makeBanner(provider, model, skills.length, process.cwd());
             itemsRef.current = [banner];
             setItems(itemsRef.current);
             setTokIn(0);
             setTokOut(0);
+            // Clear conversation history and expanded items
+            setMessages([]);
+            setExpandedItems(new Set());
             return;
         }
         if (cmd.name === "exit" || cmd.name === "quit") {
             exit();
             return;
         }
-        const beforeCwd = process.cwd();
-        const ctx = {
-            args,
-            raw: args.join(" "),
-            cwd: beforeCwd,
-            model,
-            printLine: (msg) => append({ kind: "info", text: stripAnsi(msg) }),
-        };
-        let result;
-        try {
-            result = await cmd.run(ctx);
-        }
-        catch (err) {
-            append({ kind: "error", text: err?.message ?? String(err) });
+        if (cmd.name === "model") {
+            if (args[0]) {
+                setModel(args[0]);
+                append({ kind: "info", text: `model set to ${args[0]}` });
+            }
+            else {
+                append({ kind: "info", text: `current model: ${model}` });
+            }
             return;
         }
-        if (process.env.JOY_MODEL && process.env.JOY_MODEL !== model) {
-            setModel(process.env.JOY_MODEL);
+        const printLine = (msg) => append({ kind: "info", text: stripAnsi(msg) });
+        const beforeCwd = process.cwd();
+        const result = await cmd.run({ args, raw: body, cwd, model, printLine });
+        const afterCwd = process.cwd();
+        if (afterCwd !== beforeCwd) {
+            setCwd(nextCwdAfterCommand(cwd, afterCwd));
         }
-        if (process.cwd() !== beforeCwd)
-            setCwd(process.cwd());
-        if (result?.prompt)
+        if (result.clear) {
+            const banner = makeBanner(provider, model, skills.length, process.cwd());
+            itemsRef.current = [banner];
+            setItems(itemsRef.current);
+        }
+        if (result.exit) {
+            exit();
+        }
+        if (result.prompt) {
             await runTurn(result.prompt);
-    }
-    async function runTurn(prompt) {
-        // Handle compact requests: the agent's response will be the summary
-        const isCompactRequest = prompt.startsWith("[COMPACT]");
-        if (isCompactRequest) {
-            compactRef.current = true;
         }
-        append({ kind: "user", text: prompt, ts: Date.now() });
-        setBusy(true);
+    }
+    async function runTurn(userText) {
+        append({ kind: "user", text: userText, id: mkId() });
         const pendingToolIds = new Map();
+        setBusy(true);
+        // Create a new abort controller for this run
+        const abortController = new AbortController();
+        abortControllerRef.current = abortController;
         try {
-            await runAgent(prompt, {
+            await runAgent(userText, {
+                providerName: provider,
                 model,
                 skills,
+                signal: abortController.signal,
+                // Pass the saved messages to continue the conversation
+                initialMessages: messages,
                 onEvent: (e) => {
                     switch (e.type) {
-                        case "iteration":
-                            append({ kind: "turn", n: e.n, model, ts: Date.now() });
-                            break;
-                        case "skills_loaded":
-                            break;
                         case "assistant_text":
-                            if (!e.isThinking)
-                                completeLatestPlan();
-                            if (compactRef.current) {
-                                // The agent's response to [COMPACT] is the summary
-                                compactRef.current = false;
-                                append({
-                                    kind: "compact",
-                                    summary: e.text,
-                                    savedTokens: 0, // Will be estimated
-                                    id: mkId(),
-                                });
-                            }
-                            else {
-                                append({
-                                    kind: "assistant",
-                                    text: e.text,
-                                    isThinking: e.isThinking ?? false,
-                                });
-                            }
+                            append({
+                                kind: "assistant",
+                                text: e.text,
+                                isThinking: e.isThinking ?? false,
+                            });
                             break;
                         case "tool_call": {
                             const id = mkId();
@@ -238,7 +273,7 @@ export default function App({ initialModel, skills }) {
                             break;
                         }
                         case "tool_result": {
-                            const id = pendingToolIds.get(e.id);
+                            const id = finishPendingTool(pendingToolIds, e.id);
                             if (id) {
                                 updateTool(id, {
                                     pending: false,
@@ -246,7 +281,6 @@ export default function App({ initialModel, skills }) {
                                     isError: e.is_error,
                                     finishedAt: Date.now(),
                                 });
-                                pendingToolIds.delete(e.id);
                             }
                             break;
                         }
@@ -263,6 +297,10 @@ export default function App({ initialModel, skills }) {
                                 tokIn: e.tokIn,
                                 tokOut: e.tokOut,
                             });
+                            // Save the conversation history for next time
+                            if (e._fullMessages) {
+                                setMessages(e._fullMessages);
+                            }
                             break;
                         case "stop":
                             if (e.reason === "max_tokens") {
@@ -315,23 +353,32 @@ export default function App({ initialModel, skills }) {
                 },
                 onCompact: (summary, _tokensSaved) => {
                     // Replace conversation history with the compressed summary
-                    return [
+                    const newMessages = [
                         {
                             role: "user",
                             content: `[CONVERSATION HISTORY SUMMARY]\n\n${summary}\n\n---\nThe conversation above has been compressed. Continue working based on this summary.`,
                         },
                     ];
+                    setMessages(newMessages);
+                    return newMessages;
                 },
             });
         }
         catch (err) {
-            append({ kind: "error", text: err?.message ?? String(err) });
+            // If it's an abort, show a nicer message
+            if (err?.message === "Aborted") {
+                append({ kind: "info", text: "Task interrupted." });
+            }
+            else {
+                append({ kind: "error", text: err?.message ?? String(err) });
+            }
         }
         finally {
             setBusy(false);
+            abortControllerRef.current = null;
         }
     }
-    return (_jsxs(Box, { flexDirection: "column", children: [_jsx(LogView, { items: items }), slashMode && matches.length > 0 && (_jsx(Box, { children: _jsx(SlashPicker, { matches: matches, selected: pickerIdx }) })), _jsxs(Box, { flexDirection: "row", marginTop: 1, children: [_jsx(Box, { marginRight: 1, children: _jsx(Text, { color: busy ? theme.fgMuted : theme.fg, bold: true, children: "|" }) }), _jsx(Box, { flexGrow: 1, children: _jsxs(Text, { color: busy ? theme.fgMuted : theme.fg, children: [input, !busy && _jsx(Text, { color: theme.fgMuted, children: "|" })] }) })] }), _jsx(Box, { children: _jsxs(Text, { color: theme.fgFaint, children: [shrinkPath(cwd), branch ? ` ⎇ ${branch}` : "", " · ", model, busy ? " · thinking" : "", tokIn > 0 ? ` · ↑${fmtTok(tokIn)} ↓${fmtTok(tokOut)}` : ""] }) })] }));
+    return (_jsxs(Box, { flexDirection: "column", children: [_jsx(LogView, { items: items, expandedItems: expandedItems, onToggleExpand: toggleExpand }), slashMode && matches.length > 0 && (_jsx(Box, { children: _jsx(SlashPicker, { matches: matches, selected: pickerIdx }) })), _jsxs(Box, { flexDirection: "row", marginTop: 1, children: [_jsx(Box, { marginRight: 1, children: _jsx(Text, { color: busy ? theme.fg : theme.fg, bold: true, children: "|" }) }), _jsx(Box, { flexGrow: 1, children: _jsxs(Text, { color: busy ? theme.fg : theme.fg, children: [input, !busy && _jsx(Text, { color: theme.fgMuted, children: "|" })] }) })] }), _jsx(Box, { children: _jsxs(Text, { color: theme.fgFaint, children: [shrinkPath(cwd), branch ? ` ⎇ ${branch}` : "", " · ", provider, ":", model, busy ? " · [Press Enter to interrupt]" : " · [Tab to toggle expand]", tokIn > 0 ? ` · ↑${fmtTok(tokIn)} ↓${fmtTok(tokOut)}` : ""] }) })] }));
 }
 function showMenu(append) {
     append({ kind: "info", text: "Slash commands" });

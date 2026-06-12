@@ -49,6 +49,7 @@ export type LogItem =
     }
   | {
       kind: "banner";
+      provider?: string;
       model: string;
       skillCount: number;
       cwd: string;
@@ -80,18 +81,42 @@ function clampLines(s: string, maxLines: number): {
   };
 }
 
-export const LogView = React.memo(function LogView({ items }: { items: LogItem[] }) {
+export const LogView = React.memo(function LogView({
+  items,
+  expandedItems = new Set<string>(),
+  onToggleExpand,
+}: {
+  items: LogItem[];
+  expandedItems?: Set<string>;
+  onToggleExpand?: (id: string) => void;
+}) {
   const theme = getTheme();
   return (
     <Box flexDirection="column">
       {items.map((it) => (
-        <LogRow key={it.id} item={it} theme={theme} />
+        <LogRow
+          key={it.id}
+          item={it}
+          theme={theme}
+          expanded={expandedItems.has(it.id)}
+          onToggleExpand={onToggleExpand}
+        />
       ))}
     </Box>
   );
 });
 
-export function LogRow({ item, theme }: { item: LogItem; theme: Theme }) {
+export function LogRow({
+  item,
+  theme,
+  expanded = false,
+  onToggleExpand,
+}: {
+  item: LogItem;
+  theme: Theme;
+  expanded?: boolean;
+  onToggleExpand?: (id: string) => void;
+}) {
   switch (item.kind) {
     case "turn":
       return <TurnHeader n={item.n} model={item.model} ts={item.ts} theme={theme} />;
@@ -115,7 +140,14 @@ export function LogRow({ item, theme }: { item: LogItem; theme: Theme }) {
         </Card>
       );
     case "tool":
-      return <ToolRow item={item} theme={theme} />;
+      return (
+        <ToolRow
+          item={item}
+          theme={theme}
+          expanded={expanded}
+          onToggleExpand={onToggleExpand}
+        />
+      );
     case "info":
       return (
         <Box>
@@ -153,7 +185,7 @@ function BannerRow({ item, theme }: { item: Extract<LogItem, { kind: "banner" }>
       </Box>
       <Box>
         <Text color={theme.fgMuted}>joy</Text>
-        <Text color={theme.fgMuted}> · {item.model}</Text>
+        <Text color={theme.fgMuted}> · {item.provider ? `${item.provider}:${item.model}` : item.model}</Text>
         <Text color={theme.fgMuted}> · {item.skillCount} skills</Text>
         <Text color={theme.fgMuted}> · {shrinkCwd(item.cwd)}</Text>
       </Box>
@@ -377,8 +409,16 @@ function tsLabel(ts: number): string {
 }
 
 function ToolRow({
-  item, theme,
-}: { item: Extract<LogItem, { kind: "tool" }>; theme: Theme }) {
+  item,
+  theme,
+  expanded = false,
+  onToggleExpand,
+}: {
+  item: Extract<LogItem, { kind: "tool" }>;
+  theme: Theme;
+  expanded?: boolean;
+  onToggleExpand?: (id: string) => void;
+}) {
   const display = describeToolCall(item.name, item.input);
   const isBash = item.name === "bash";
 
@@ -445,6 +485,8 @@ function ToolRow({
           body={bodyForRender}
           isError={!!item.isError}
           theme={theme}
+          expanded={expanded}
+          onToggleExpand={onToggleExpand ? () => onToggleExpand(item.id) : undefined}
         />
       )}
     </Box>
@@ -452,17 +494,28 @@ function ToolRow({
 }
 
 function OutputPanel({
-  body, isError, theme,
-}: { body: string; isError: boolean; theme: Theme }) {
-  const { body: shown, hidden, total } = clampLines(body, MAX_OUTPUT_LINES);
+  body,
+  isError,
+  theme,
+  expanded = false,
+  onToggleExpand,
+}: {
+  body: string;
+  isError: boolean;
+  theme: Theme;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
+}) {
+  const { body: shown, hidden } = clampLines(body, MAX_OUTPUT_LINES);
+  const displayBody = expanded ? body : shown;
   return (
     <Box paddingLeft={2} flexDirection="column">
-      {shown.split("\n").map((line, i) => (
+      {displayBody.split("\n").map((line, i) => (
         <Text key={i} color={isError ? theme.failure : theme.fgMuted}>{line || " "}</Text>
       ))}
       {hidden > 0 && (
         <Text color={theme.fgFaint}>
-          - {hidden} more lines -
+          {expanded ? "- collapse -" : `- ${hidden} more lines -`}
         </Text>
       )}
     </Box>

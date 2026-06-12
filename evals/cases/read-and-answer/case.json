@@ -1,0 +1,37 @@
+{
+  "name": "read-and-answer",
+  "prompt": "Read README.md and answer with the project codename.",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "README.md": "# Tiny Project\n\nProject codename: Orange Kite\n\nThis repository is used for a read-only eval case.\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_read_readme",
+          "name": "read",
+          "input": {
+            "path": "README.md"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [
+        { "type": "text", "text": "Orange Kite" }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "grep -q 'Project codename: Orange Kite' README.md && echo ok",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "ok"
+  }
+}

@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { stdin, stdout } from "node:process";
 import { runAgent, type AgentEvent } from "./agent.js";
+import type { ProviderName } from "./providers/types.js";
 import type { SkillMeta } from "./skills.js";
 import {
   SLASH_COMMANDS,
@@ -75,12 +76,14 @@ function defaultOnEvent(e: AgentEvent) {
 }
 
 export interface ReplOptions {
+  provider: ProviderName;
   model: string;
   skills: SkillMeta[];
   skillsExtraRoots?: string[];
 }
 
 export async function startRepl(opts: ReplOptions): Promise<void> {
+  let provider = opts.provider;
   let model = opts.model;
   const skills = opts.skills;
 
@@ -106,7 +109,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     });
   }
 
-  printBanner(model, skills.length);
+  printBanner(provider, model, skills.length);
   rl.prompt();
 
   for await (const rawLine of rl as AsyncIterable<string>) {
@@ -128,7 +131,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
         model = process.env.JOY_MODEL;
       }
       if (result.prompt) {
-        await runOnce(result.prompt, model, skills);
+        await runOnce(result.prompt, provider, model, skills);
       }
       stdout.write("\n");
       rl.prompt();
@@ -136,7 +139,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
     }
 
     try {
-      await runOnce(line, model, skills);
+      await runOnce(line, provider, model, skills);
     } catch (err: any) {
       console.error(`${C.red}error:${C.reset} ${err?.message ?? err}`);
     }
@@ -147,9 +150,9 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
   rl.close();
 }
 
-function printBanner(model: string, skillCount: number) {
+function printBanner(provider: ProviderName, model: string, skillCount: number) {
   stdout.write(
-    `${C.dim}tools: read, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${model}${C.reset}\n`,
+    `${C.dim}tools: read, list_files, glob, grep, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`,
   );
   stdout.write(
     `${C.dim}type ${C.reset}${C.cyan}/${C.reset}${C.dim} for commands, ${C.reset}${C.cyan}Tab${C.reset}${C.dim} to complete, ${C.reset}${C.cyan}/exit${C.reset}${C.dim} to quit${C.reset}\n\n`,
@@ -158,10 +161,12 @@ function printBanner(model: string, skillCount: number) {
 
 async function runOnce(
   prompt: string,
+  provider: ProviderName,
   model: string,
   skills: SkillMeta[],
 ): Promise<void> {
   await runAgent(prompt, {
+    providerName: provider,
     model,
     skills,
     onEvent: defaultOnEvent,
