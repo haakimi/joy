@@ -1,13 +1,20 @@
 # joy-agent
 
-A minimal terminal coding agent — like a tiny Pi Coding Agent — with read / list_files / glob / grep / write / edit / bash tools,
-powered by an Anthropic-compatible model (default: Cici Switch / Claude Sonnet).
+Joy is a GLM-ready terminal coding agent for Chinese developer workflows.
 
+It provides a provider-neutral agent loop, deterministic mock provider, local eval harness, and structured code-search/edit tools (`list_files`, `glob`, `grep`, `read`, `write`, `edit`, `bash`). Today Joy can run with Anthropic-compatible backends or the local mock provider; the `glm` provider is reserved as a skeleton so future GLM API access can be added without rewriting the agent loop.
+
+```text
+────────────────────────────────────────────────────────────
+  prompt → model picks a tool → Joy executes → model continues
+────────────────────────────────────────────────────────────
 ```
-─────────────────────────────────────────────
-  for loop → model picks a tool → execute → repeat
-─────────────────────────────────────────────
-```
+
+Current focus:
+- GLM-ready provider architecture (`anthropic`, `mock`, reserved `glm`)
+- Local eval harness for measuring coding-agent behavior
+- Chinese coding-task cases for future GLM benchmarking
+- Safer code discovery through `list_files`, `glob`, and `grep`
 
 ## Quick start
 
