@@ -129,6 +129,7 @@ tools.ts        — read, list_files, glob, grep, write, edit, apply_patch, bash
 ```
 
 - Tools follow the Anthropic Tool Use format. Every tool result (including errors) feeds back into the messages array.
+- Joy uses prompt-level intent routing: it should inspect local files before answering questions about the current repo/Joy implementation, while answering general beginner concept questions directly and simply.
 - Use `list_files`, `glob`, and `grep` for capped code discovery before falling back to shell search commands.
 - Use `apply_patch` for unified-diff edits to existing text files; Joy validates all hunks before writing so failed patches do not partially modify files.
 - The loop stops when the model returns `stop_reason !== "tool_use"`.
