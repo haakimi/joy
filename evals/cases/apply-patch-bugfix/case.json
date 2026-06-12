@@ -1,0 +1,35 @@
+{
+  "name": "apply-patch-bugfix",
+  "prompt": "请用 patch 修复 add.js，让 add(2, 3) 输出 5。",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_apply_patch",
+          "name": "apply_patch",
+          "input": {
+            "patch": "--- a/add.js\n+++ b/add.js\n@@ -1,2 +1,2 @@\n-function add(a, b) { return a - b; }\n+function add(a, b) { return a + b; }\n console.log(add(2, 3));\n"
+          }
+        }
+      ],
+      "stopReason": "tool_use",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [{ "type": "text", "text": "已用 patch 修复 add.js。" }],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "node add.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "5"
+  }
+}

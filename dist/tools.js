@@ -132,6 +132,19 @@ export const tools = [
         },
     },
     {
+        name: "apply_patch",
+        description: "Apply a unified diff patch to existing UTF-8 text files. " +
+            "Use this for multi-line, multi-hunk, or multi-file edits. " +
+            "All hunks are validated before any file is written; file creation/deletion is not supported in v1.",
+        input_schema: {
+            type: "object",
+            properties: {
+                patch: { type: "string", description: "Unified diff patch text." },
+            },
+            required: ["patch"],
+        },
+    },
+    {
         name: "bash",
         description: "Run a shell command via `bash -lc` in the current working directory. " +
             "Returns combined stdout/stderr and the exit code. Avoid long-running interactive commands.",
@@ -150,7 +163,7 @@ export const tools = [
     {
         name: "spawn_agent",
         description: "Spawn a sub-agent to work on a specific subtask in parallel. " +
-            "The sub-agent runs independently with its own tools (read, list_files, glob, grep, write, edit, bash) " +
+            "The sub-agent runs independently with its own tools (read, list_files, glob, grep, write, edit, apply_patch, bash) " +
             "and returns a summary when done. Use this to delegate well-scoped, independent " +
             "work that can run concurrently with other tasks. Returns a subagent ID.",
         input_schema: {
@@ -200,6 +213,9 @@ const DEFAULT_GREP_MAX = 100;
 const HARD_GREP_MAX = 1_000;
 const MAX_GREP_FILE_BYTES = 1_000_000;
 const MAX_GREP_LINE_CHARS = 300;
+const MAX_PATCH_BYTES = 200_000;
+const MAX_PATCH_FILES = 50;
+const MAX_PATCH_HUNKS = 500;
 const IGNORED_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".next", ".cache"]);
 function clampLimit(value, defaultValue, hardMax) {
     const n = Number(value ?? defaultValue);
@@ -407,6 +423,192 @@ async function grepTool(input) {
         lines.push(`... [truncated after ${matches.length} matches; narrow path/include or increase max_matches]`);
     return { content: limitOutput(lines.join("\n")), is_error: false };
 }
+function stripDiffPrefix(filePath) {
+    const withoutMeta = filePath.trim().split(/\s+/)[0];
+    if (withoutMeta === "/dev/null")
+        return withoutMeta;
+    return withoutMeta.replace(/^[ab]\//, "");
+}
+function parseHunkHeader(line) {
+    const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (!match)
+        return undefined;
+    return {
+        oldStart: Number(match[1]),
+        oldCount: Number(match[2] ?? "1"),
+        newStart: Number(match[3]),
+        newCount: Number(match[4] ?? "1"),
+    };
+}
+function parseUnifiedPatch(patch) {
+    if (!patch.trim())
+        throw new Error("Invalid patch: patch must be non-empty");
+    if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
+        throw new Error(`Invalid patch: patch exceeds ${MAX_PATCH_BYTES} bytes`);
+    }
+    const lines = patch.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    if (lines.at(-1) === "")
+        lines.pop();
+    const files = [];
+    let i = 0;
+    while (i < lines.length) {
+        if (!lines[i].startsWith("--- ")) {
+            i++;
+            continue;
+        }
+        const oldPath = stripDiffPrefix(lines[i].slice(4));
+        i++;
+        if (i >= lines.length || !lines[i].startsWith("+++ ")) {
+            throw new Error("Invalid patch: file header must include +++ line");
+        }
+        const newPath = stripDiffPrefix(lines[i].slice(4));
+        i++;
+        if (oldPath === "/dev/null" || newPath === "/dev/null") {
+            throw new Error("Invalid patch: file creation and deletion are not supported in apply_patch v1; patch existing files only");
+        }
+        if (oldPath !== newPath) {
+            throw new Error("Invalid patch: renames are not supported in apply_patch v1");
+        }
+        const patchFile = { oldPath, newPath, path: newPath, hunks: [] };
+        while (i < lines.length) {
+            if (lines[i].startsWith("--- "))
+                break;
+            if (lines[i].startsWith("diff --git ") && patchFile.hunks.length > 0)
+                break;
+            if (!lines[i].startsWith("@@ ")) {
+                i++;
+                continue;
+            }
+            const header = parseHunkHeader(lines[i]);
+            if (!header)
+                throw new Error(`Invalid patch: malformed hunk header "${lines[i]}"`);
+            i++;
+            const hunk = { ...header, lines: [] };
+            while (i < lines.length && !lines[i].startsWith("@@ ") && !lines[i].startsWith("--- ")) {
+                const line = lines[i];
+                if (line === "\\ No newline at end of file") {
+                    i++;
+                    continue;
+                }
+                const marker = line[0];
+                if (marker === " ")
+                    hunk.lines.push({ kind: "context", text: line.slice(1) });
+                else if (marker === "-")
+                    hunk.lines.push({ kind: "remove", text: line.slice(1) });
+                else if (marker === "+")
+                    hunk.lines.push({ kind: "add", text: line.slice(1) });
+                else
+                    throw new Error(`Invalid patch: hunk line must start with space, -, or +: "${line}"`);
+                i++;
+            }
+            if (hunk.lines.length === 0)
+                throw new Error("Invalid patch: hunk must contain at least one line");
+            patchFile.hunks.push(hunk);
+        }
+        if (patchFile.hunks.length === 0)
+            throw new Error(`Invalid patch: file ${patchFile.path} has no hunks`);
+        files.push(patchFile);
+    }
+    if (files.length === 0)
+        throw new Error("Invalid patch: no file sections found");
+    if (files.length > MAX_PATCH_FILES)
+        throw new Error(`Invalid patch: more than ${MAX_PATCH_FILES} files`);
+    const hunkCount = files.reduce((sum, file) => sum + file.hunks.length, 0);
+    if (hunkCount > MAX_PATCH_HUNKS)
+        throw new Error(`Invalid patch: more than ${MAX_PATCH_HUNKS} hunks`);
+    return files;
+}
+function splitTextLines(text) {
+    const trailingNewline = text.endsWith("\n");
+    const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    if (trailingNewline)
+        lines.pop();
+    return { lines, trailingNewline };
+}
+function joinTextLines(lines, trailingNewline) {
+    return lines.join("\n") + (trailingNewline ? "\n" : "");
+}
+function lineBlockMatches(lines, start, block) {
+    if (start < 0 || start + block.length > lines.length)
+        return false;
+    for (let i = 0; i < block.length; i++) {
+        if (lines[start + i] !== block[i])
+            return false;
+    }
+    return true;
+}
+function findUniqueLineBlock(lines, block, hintedIndex, filePath) {
+    if (lineBlockMatches(lines, hintedIndex, block))
+        return hintedIndex;
+    const matches = [];
+    for (let i = 0; i <= lines.length - block.length; i++) {
+        if (lineBlockMatches(lines, i, block))
+            matches.push(i);
+    }
+    if (matches.length === 1)
+        return matches[0];
+    if (matches.length > 1) {
+        throw new Error(`Patch hunk for ${filePath} is ambiguous; include more context`);
+    }
+    throw new Error(`Patch hunk for ${filePath} does not match existing content`);
+}
+function applyFileHunks(original, patchFile) {
+    const split = splitTextLines(original);
+    let lines = split.lines;
+    let added = 0;
+    let removed = 0;
+    for (const hunk of patchFile.hunks) {
+        const oldLines = hunk.lines
+            .filter((line) => line.kind === "context" || line.kind === "remove")
+            .map((line) => line.text);
+        const newLines = hunk.lines
+            .filter((line) => line.kind === "context" || line.kind === "add")
+            .map((line) => line.text);
+        const hintedIndex = Math.max(0, hunk.oldStart - 1);
+        const index = findUniqueLineBlock(lines, oldLines, hintedIndex, patchFile.path);
+        lines = [...lines.slice(0, index), ...newLines, ...lines.slice(index + oldLines.length)];
+        added += hunk.lines.filter((line) => line.kind === "add").length;
+        removed += hunk.lines.filter((line) => line.kind === "remove").length;
+    }
+    return { text: joinTextLines(lines, split.trailingNewline), added, removed };
+}
+function assertPathInsideCwd(absPath) {
+    const cwd = process.cwd();
+    const rel = path.relative(cwd, absPath);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel)))
+        return;
+    throw new Error(`Patch path escapes current working directory: ${absPath}`);
+}
+async function applyPatchTool(input) {
+    const patch = String(input.patch ?? "");
+    const files = parseUnifiedPatch(patch);
+    const updates = [];
+    let added = 0;
+    let removed = 0;
+    let hunkCount = 0;
+    for (const file of files) {
+        const abs = resolvePath(file.path);
+        assertPathInsideCwd(abs);
+        const stat = await fs.stat(abs);
+        if (!stat.isFile())
+            throw new Error(`Patch target is not a file: ${file.path}`);
+        const buf = await fs.readFile(abs);
+        if (buf.includes(0))
+            throw new Error(`Patch target appears to be binary: ${file.path}`);
+        const applied = applyFileHunks(buf.toString("utf8"), file);
+        updates.push({ abs, text: applied.text });
+        added += applied.added;
+        removed += applied.removed;
+        hunkCount += file.hunks.length;
+    }
+    for (const update of updates) {
+        await fs.writeFile(update.abs, update.text, "utf8");
+    }
+    return {
+        content: `Applied patch to ${files.length} file${files.length === 1 ? "" : "s"} (${hunkCount} hunk${hunkCount === 1 ? "" : "s"}, +${added} -${removed})`,
+        is_error: false,
+    };
+}
 let _toolEventEmitter = null;
 export function setToolEventEmitter(emitter) {
     _toolEventEmitter = emitter;
@@ -473,6 +675,9 @@ export async function runTool(name, input) {
                     content: `Edited ${p} (${count} replacement${count > 1 ? "s" : ""})`,
                     is_error: false,
                 };
+            }
+            case "apply_patch": {
+                return await applyPatchTool(input);
             }
             case "bash": {
                 const cmd = String(input.command ?? "");

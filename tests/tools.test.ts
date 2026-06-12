@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -22,16 +22,196 @@ async function writeFixture(filePath: string, content: string): Promise<void> {
   await writeFile(filePath, content, "utf8");
 }
 
-test("tools array exposes list_files, glob, and grep", () => {
+test("tools array exposes list_files, glob, grep, and apply_patch", () => {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
   assert.ok(byName.has("list_files"));
   assert.ok(byName.has("glob"));
   assert.ok(byName.has("grep"));
+  assert.ok(byName.has("apply_patch"));
   assert.deepEqual((byName.get("list_files")?.input_schema as any).required ?? [], []);
   assert.deepEqual((byName.get("glob")?.input_schema as any).required, ["pattern"]);
   assert.deepEqual((byName.get("grep")?.input_schema as any).required, ["pattern"]);
+  assert.deepEqual((byName.get("apply_patch")?.input_schema as any).required, ["patch"]);
 });
+
+test("apply_patch applies a simple single-file hunk", async () => {
+  await withTempCwd(async (root) => {
+    const filePath = path.join(root, "add.js");
+    await writeFixture(filePath, "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/add.js
++++ b/add.js
+@@ -1,2 +1,2 @@
+-function add(a, b) { return a - b; }
++function add(a, b) { return a + b; }
+ console.log(add(2, 3));
+`,
+    });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /Applied patch to 1 file/);
+    assert.match(result.content, /1 hunk/);
+    assert.equal(await readFile(filePath, "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+  });
+});
+
+test("apply_patch applies multiple hunks in one file", async () => {
+  await withTempCwd(async (root) => {
+    const filePath = path.join(root, "math.js");
+    await writeFixture(filePath, "function add(a, b) {\n  return a - b;\n}\n\nfunction label() {\n  return 'bad';\n}\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/math.js
++++ b/math.js
+@@ -1,3 +1,3 @@
+ function add(a, b) {
+-  return a - b;
++  return a + b;
+ }
+@@ -5,3 +5,3 @@
+ function label() {
+-  return 'bad';
++  return 'good';
+ }
+`,
+    });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /2 hunks/);
+    assert.equal(await readFile(filePath, "utf8"), "function add(a, b) {\n  return a + b;\n}\n\nfunction label() {\n  return 'good';\n}\n");
+  });
+});
+
+test("apply_patch applies multiple files atomically on success", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, "a.txt"), "alpha old\n");
+    await writeFixture(path.join(root, "b.txt"), "beta old\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/a.txt
++++ b/a.txt
+@@ -1,1 +1,1 @@
+-alpha old
++alpha new
+--- a/b.txt
++++ b/b.txt
+@@ -1,1 +1,1 @@
+-beta old
++beta new
+`,
+    });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /2 files/);
+    assert.equal(await readFile(path.join(root, "a.txt"), "utf8"), "alpha new\n");
+    assert.equal(await readFile(path.join(root, "b.txt"), "utf8"), "beta new\n");
+  });
+});
+
+test("apply_patch does not partially write when a later file fails", async () => {
+  await withTempCwd(async (root) => {
+    const aPath = path.join(root, "a.txt");
+    const bPath = path.join(root, "b.txt");
+    await writeFixture(aPath, "alpha old\n");
+    await writeFixture(bPath, "beta old\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/a.txt
++++ b/a.txt
+@@ -1,1 +1,1 @@
+-alpha old
++alpha new
+--- a/b.txt
++++ b/b.txt
+@@ -1,1 +1,1 @@
+-missing old
++beta new
+`,
+    });
+
+    assert.equal(result.is_error, true);
+    assert.match(result.content, /does not match|not found/i);
+    assert.equal(await readFile(aPath, "utf8"), "alpha old\n");
+    assert.equal(await readFile(bPath, "utf8"), "beta old\n");
+  });
+});
+
+test("apply_patch reports missing context and leaves file unchanged", async () => {
+  await withTempCwd(async (root) => {
+    const filePath = path.join(root, "app.js");
+    await writeFixture(filePath, "const value = 1;\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/app.js
++++ b/app.js
+@@ -1,1 +1,1 @@
+-const value = 2;
++const value = 3;
+`,
+    });
+
+    assert.equal(result.is_error, true);
+    assert.match(result.content, /does not match|not found/i);
+    assert.equal(await readFile(filePath, "utf8"), "const value = 1;\n");
+  });
+});
+
+test("apply_patch reports ambiguous fallback matches", async () => {
+  await withTempCwd(async (root) => {
+    const filePath = path.join(root, "dup.txt");
+    await writeFixture(filePath, "same\nsame\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- a/dup.txt
++++ b/dup.txt
+@@ -10,1 +10,1 @@
+-same
++changed
+`,
+    });
+
+    assert.equal(result.is_error, true);
+    assert.match(result.content, /ambiguous|more context/i);
+    assert.equal(await readFile(filePath, "utf8"), "same\nsame\n");
+  });
+});
+
+test("apply_patch rejects file creation and deletion in v1", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, "old.txt"), "old\n");
+
+    const createResult = await runTool("apply_patch", {
+      patch: `--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,1 @@
++new
+`,
+    });
+    const deleteResult = await runTool("apply_patch", {
+      patch: `--- a/old.txt
++++ /dev/null
+@@ -1,1 +0,0 @@
+-old
+`,
+    });
+
+    assert.equal(createResult.is_error, true);
+    assert.match(createResult.content, /not supported|existing/i);
+    assert.equal(deleteResult.is_error, true);
+    assert.match(deleteResult.content, /not supported|existing/i);
+    assert.equal(await readFile(path.join(root, "old.txt"), "utf8"), "old\n");
+  });
+});
+
+test("apply_patch reports malformed patches", async () => {
+  const result = await runTool("apply_patch", { patch: "not a patch" });
+
+  assert.equal(result.is_error, true);
+  assert.match(result.content, /Invalid patch|hunk|file/i);
+});
+
 
 test("list_files lists direct children without recursing by default", async () => {
   await withTempCwd(async (root) => {

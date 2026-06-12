@@ -2,7 +2,7 @@
 
 Joy is a GLM-ready terminal coding agent for Chinese developer workflows.
 
-It provides a provider-neutral agent loop, deterministic mock provider, local eval harness, and structured code-search/edit tools (`list_files`, `glob`, `grep`, `read`, `write`, `edit`, `bash`). Today Joy can run with Anthropic-compatible backends or the local mock provider; the `glm` provider is reserved as a skeleton so future GLM API access can be added without rewriting the agent loop.
+It provides a provider-neutral agent loop, deterministic mock provider, local eval harness, and structured code-search/edit tools (`list_files`, `glob`, `grep`, `read`, `write`, `edit`, `apply_patch`, `bash`). Today Joy can run with Anthropic-compatible backends or the local mock provider; the `glm` provider is reserved as a skeleton so future GLM API access can be added without rewriting the agent loop.
 
 ```text
 ────────────────────────────────────────────────────────────
@@ -102,6 +102,7 @@ Each eval case is a directory with a `case.json` manifest containing:
 - `verify` — a shell command plus expected exit code/stdout/stderr checks
 
 Built-in cases:
+- `apply-patch-bugfix` — Chinese prompt plus unified-diff patch edit.
 - `single-file-bugfix` — English single-file edit.
 - `zh-single-file-bugfix` — Chinese prompt plus single-file edit.
 - `zh-multi-file-bugfix` — Chinese prompt plus multi-file project.
@@ -121,10 +122,11 @@ npm run build && npm run start -- "prompt"    # build + run compiled JS
 ```
 cli.ts          — REPL entry & inline prompt
 agent.ts        — for-loop: model → tools → model → ...
-tools.ts        — read, list_files, glob, grep, write, edit, bash implementations
+tools.ts        — read, list_files, glob, grep, write, edit, apply_patch, bash implementations
 ```
 
 - Tools follow the Anthropic Tool Use format. Every tool result (including errors) feeds back into the messages array.
 - Use `list_files`, `glob`, and `grep` for capped code discovery before falling back to shell search commands.
+- Use `apply_patch` for unified-diff edits to existing text files; Joy validates all hunks before writing so failed patches do not partially modify files.
 - The loop stops when the model returns `stop_reason !== "tool_use"`.
 - Max 25 tool-call iterations per user prompt (configurable).

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -92,6 +92,59 @@ test("runAgent executes grep tool calls through the mock provider", async () => 
 
     assert.equal(result, "found it");
     assert.match(toolResults.join("\n"), /src\/app\.ts:1:/);
+  } finally {
+    process.chdir(previous);
+  }
+});
+
+test("runAgent executes apply_patch tool calls through the mock provider", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "joy-agent-patch-"));
+  await mkdir(path.join(root, "src"), { recursive: true });
+  const filePath = path.join(root, "src/calc.js");
+  await writeFile(filePath, "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n", "utf8");
+  const previous = process.cwd();
+  const toolResults: string[] = [];
+  const provider = new MockProvider([
+    {
+      content: [{
+        type: "tool_use",
+        id: "toolu_patch",
+        name: "apply_patch",
+        input: {
+          patch: `--- a/src/calc.js
++++ b/src/calc.js
+@@ -1,2 +1,2 @@
+-function add(a, b) { return a - b; }
++function add(a, b) { return a + b; }
+ console.log(add(2, 3));
+`,
+        },
+      }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+    {
+      content: [{ type: "text", text: "patched" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  ]);
+
+  try {
+    process.chdir(root);
+    const result = await runAgent("fix add", {
+      model: "mock",
+      provider,
+      maxIterations: 3,
+      skills: [],
+      onEvent: (e) => {
+        if (e.type === "tool_result") toolResults.push(e.output);
+      },
+    });
+
+    assert.equal(result, "patched");
+    assert.match(toolResults.join("\n"), /Applied patch to 1 file/);
+    assert.equal(await readFile(filePath, "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
   } finally {
     process.chdir(previous);
   }

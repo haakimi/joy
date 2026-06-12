@@ -152,7 +152,7 @@ export async function startRepl(opts: ReplOptions): Promise<void> {
 
 function printBanner(provider: ProviderName, model: string, skillCount: number) {
   stdout.write(
-    `${C.dim}tools: read, list_files, glob, grep, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`,
+    `${C.dim}tools: read, list_files, glob, grep, write, edit, apply_patch, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`,
   );
   stdout.write(
     `${C.dim}type ${C.reset}${C.cyan}/${C.reset}${C.dim} for commands, ${C.reset}${C.cyan}Tab${C.reset}${C.dim} to complete, ${C.reset}${C.cyan}/exit${C.reset}${C.dim} to quit${C.reset}\n\n`,

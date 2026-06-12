@@ -57,6 +57,19 @@ export function describeToolCall(name, input) {
                 return { headline: `✏️  ${path}${replaceAll}`, outputPanel: "content" };
             break;
         }
+        case "apply_patch": {
+            const patch = String(obj?.patch ?? "");
+            const files = new Set(patch
+                .split(/\r?\n/)
+                .filter((line) => line.startsWith("+++ "))
+                .map((line) => line.slice(4).trim().split(/\s+/)[0].replace(/^b\//, ""))
+                .filter((path) => path && path !== "/dev/null"));
+            const detail = [
+                files.size > 0 ? `${files.size} file${files.size === 1 ? "" : "s"}` : undefined,
+                patch ? `${patch.length} chars` : undefined,
+            ].filter(Boolean).join(" · ") || undefined;
+            return { headline: "🧩 apply patch", detail, outputPanel: "content" };
+        }
     }
     // Fallback: pretty-print the JSON compactly
     return {

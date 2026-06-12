@@ -96,6 +96,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       printLine(`  ${C.cyan}grep${C.reset}        ${C.dim}search text with regex${C.reset}`);
       printLine(`  ${C.cyan}write${C.reset}       ${C.dim}create/overwrite a file${C.reset}`);
       printLine(`  ${C.cyan}edit${C.reset}        ${C.dim}replace exact text in a file${C.reset}`);
+      printLine(`  ${C.cyan}apply_patch${C.reset} ${C.dim}apply a unified diff to existing files${C.reset}`);
       printLine(`  ${C.cyan}bash${C.reset}        ${C.dim}run a shell command (bash -lc)${C.reset}`);
       return {};
     },

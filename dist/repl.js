@@ -121,7 +121,7 @@ export async function startRepl(opts) {
     rl.close();
 }
 function printBanner(provider, model, skillCount) {
-    stdout.write(`${C.dim}tools: read, list_files, glob, grep, write, edit, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`);
+    stdout.write(`${C.dim}tools: read, list_files, glob, grep, write, edit, apply_patch, bash  ·  skills: ${skillCount}  ·  model: ${provider}:${model}${C.reset}\n`);
     stdout.write(`${C.dim}type ${C.reset}${C.cyan}/${C.reset}${C.dim} for commands, ${C.reset}${C.cyan}Tab${C.reset}${C.dim} to complete, ${C.reset}${C.cyan}/exit${C.reset}${C.dim} to quit${C.reset}\n\n`);
 }
 async function runOnce(prompt, provider, model, skills) {

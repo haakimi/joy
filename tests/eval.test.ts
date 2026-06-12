@@ -57,6 +57,43 @@ async function createBugfixCase(root: string, verify = { command: "node add.js",
   return loaded;
 }
 
+async function createApplyPatchCase(root: string) {
+  const caseDir = path.join(root, "cases", "apply-patch-bugfix");
+  await mkdir(caseDir, { recursive: true });
+  await writeFile(path.join(caseDir, "case.json"), JSON.stringify({
+    name: "apply-patch-bugfix",
+    prompt: "Fix add.js so add(2, 3) prints 5 using a patch.",
+    provider: "mock",
+    model: "mock",
+    files: {
+      "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+    },
+    mockResponses: [
+      {
+        content: [{
+          type: "tool_use",
+          id: "toolu_patch",
+          name: "apply_patch",
+          input: {
+            patch: "--- a/add.js\n+++ b/add.js\n@@ -1,2 +1,2 @@\n-function add(a, b) { return a - b; }\n+function add(a, b) { return a + b; }\n console.log(add(2, 3));\n"
+          }
+        }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      },
+      {
+        content: [{ type: "text", text: "Patched add.js." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      }
+    ],
+    verify: { command: "node add.js", expectExitCode: 0, expectStdoutIncludes: "5" }
+  }), "utf8");
+  const [loaded] = await loadEvalCases(path.join(root, "cases"));
+  return loaded;
+}
+
+
 test("loadEvalCases reads case manifests from evals/cases/*", async () => {
   const root = await makeCaseRoot();
   const caseDir = path.join(root, "cases", "sample");
@@ -94,6 +131,17 @@ test("runEvalCase prepares files, runs mock agent, and verifies expected output"
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
 });
 
+test("runEvalCase supports apply_patch mock tool calls", async () => {
+  const root = await makeCaseRoot();
+  const loaded = await createApplyPatchCase(root);
+
+  const result = await runEvalCase(loaded, { workRoot: path.join(root, "work"), keepRuns: true });
+
+  assert.equal(result.status, "passed");
+  assert.equal(result.verify.exitCode, 0);
+  assert.match(result.verify.stdout, /5/);
+  assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+});
 test("runEvalCase deletes passing run directories by default", async () => {
   const root = await makeCaseRoot();
   const loaded = await createBugfixCase(root);
