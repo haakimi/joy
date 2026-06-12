@@ -1,7 +1,8 @@
 import { tools, runTool, setSubagentRunner, setToolEventEmitter } from "./tools.js";
 import { discoverSkills, buildSkillsPrompt, type SkillMeta } from "./skills.js";
 import { createProvider } from "./providers/index.js";
-import type { ModelProvider, ProviderMessage, ProviderName, ProviderToolResultBlock } from "./providers/types.js";
+import { normalizeProviderResponse } from "./providers/normalize.js";
+import type { ModelProvider, ProviderMessage, ProviderName, ProviderToolResultBlock, ToolRepairDiagnostic } from "./providers/types.js";
 
 const BASE_SYSTEM_PROMPT = `You are Joy, a terminal coding agent.
 You have local tools for reading files, listing files, globbing paths, grepping text,
@@ -106,6 +107,10 @@ export type AgentEvent =
       type: "subagent_result";
       agentId: string;
       result: string;
+    }
+  | {
+      type: "provider_response_repaired";
+      diagnostics: ToolRepairDiagnostic[];
     };
 const COMPACT_SUMMARY_PROMPT = `Provide a detailed summary of the conversation so far. Include:
 1. The user's original request and goal
@@ -232,7 +237,7 @@ export async function runAgent(
       throw new Error("Aborted");
     }
 
-    const resp = await provider.createMessage({
+    const rawResp = await provider.createMessage({
       model: opts.model,
       maxTokens: opts.maxTokens ?? maxTokensDefault,
       system,
@@ -240,6 +245,10 @@ export async function runAgent(
       messages,
       signal,
     });
+    const { response: resp, diagnostics } = normalizeProviderResponse(rawResp);
+    if (diagnostics.length > 0) {
+      emit({ type: "provider_response_repaired", diagnostics });
+    }
 
     // Check abort after API call returns
     if (signal?.aborted) {

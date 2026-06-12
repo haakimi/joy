@@ -142,6 +142,46 @@ test("runEvalCase supports apply_patch mock tool calls", async () => {
   assert.match(result.verify.stdout, /5/);
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
 });
+test("runEvalCase supports repaired tool-call aliases", async () => {
+  const root = await makeCaseRoot();
+  const caseDir = path.join(root, "cases", "tool-call-repair-apply-diff");
+  await mkdir(caseDir, { recursive: true });
+  await writeFile(path.join(caseDir, "case.json"), JSON.stringify({
+    name: "tool-call-repair-apply-diff",
+    prompt: "Fix add.js using a non-standard tool call.",
+    provider: "mock",
+    model: "mock",
+    files: {
+      "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+    },
+    mockResponses: [
+      {
+        content: [{
+          type: "tool_use",
+          name: "apply_diff",
+          input: {
+            diff: "--- a/add.js\n+++ b/add.js\n@@ -1,2 +1,2 @@\n-function add(a, b) { return a - b; }\n+function add(a, b) { return a + b; }\n console.log(add(2, 3));\n"
+          }
+        }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      },
+      {
+        content: [{ type: "text", text: "Repaired and patched." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      }
+    ],
+    verify: { command: "node add.js", expectExitCode: 0, expectStdoutIncludes: "5" }
+  }), "utf8");
+  const [loaded] = await loadEvalCases(path.join(root, "cases"));
+
+  const result = await runEvalCase(loaded, { workRoot: path.join(root, "work"), keepRuns: true });
+
+  assert.equal(result.status, "passed");
+  assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+});
+
 test("runEvalCase deletes passing run directories by default", async () => {
   const root = await makeCaseRoot();
   const loaded = await createBugfixCase(root);

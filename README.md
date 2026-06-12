@@ -43,6 +43,8 @@ Joy uses a provider architecture so the agent loop can run against different mod
 - `mock` — deterministic local provider for developing and testing the agent loop without network access.
 - `glm` — reserved skeleton for future GLM support. It does not call the real GLM API yet.
 
+Joy also includes a conservative tool-call normalization layer for future GLM compatibility. It repairs exact, common tool-name and argument aliases (for example `read_file` → `read`, `filename` → `path`, `apply_diff` → `apply_patch`) and parses stringified JSON arguments, but it does not guess unsafe missing arguments.
+
 Select a provider with:
 
 ```sh
@@ -103,6 +105,7 @@ Each eval case is a directory with a `case.json` manifest containing:
 
 Built-in cases:
 - `apply-patch-bugfix` — Chinese prompt plus unified-diff patch edit.
+- `tool-call-repair-apply-diff` — GLM-style non-standard tool name/argument repair plus patch edit.
 - `single-file-bugfix` — English single-file edit.
 - `zh-single-file-bugfix` — Chinese prompt plus single-file edit.
 - `zh-multi-file-bugfix` — Chinese prompt plus multi-file project.

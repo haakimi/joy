@@ -149,3 +149,131 @@ test("runAgent executes apply_patch tool calls through the mock provider", async
     process.chdir(previous);
   }
 });
+
+test("runAgent repairs aliased read tool calls with wrong stop reason", async () => {
+  const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+  const toolResults: string[] = [];
+  const provider = new MockProvider([
+    {
+      content: [{ type: "tool_use", name: "read_file", input: { filename: "package.json" } } as any],
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+    {
+      content: [{ type: "text", text: "read repaired" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  ]);
+
+  const result = await runAgent("read package", {
+    model: "mock",
+    provider,
+    maxIterations: 3,
+    skills: [],
+    onEvent: (e) => {
+      if (e.type === "tool_call") toolCalls.push({ id: e.id, name: e.name, input: e.input });
+      if (e.type === "tool_result") toolResults.push(e.output);
+    },
+  });
+
+  assert.equal(result, "read repaired");
+  assert.equal(toolCalls[0].name, "read");
+  assert.deepEqual(toolCalls[0].input, { path: "package.json" });
+  assert.match(toolCalls[0].id, /^toolu_repaired_0_/);
+  assert.match(toolResults.join("\n"), /joy-agent/);
+});
+
+test("runAgent repairs bash alias with stringified JSON input", async () => {
+  const toolCalls: Array<{ name: string; input: unknown }> = [];
+  const toolResults: string[] = [];
+  const provider = new MockProvider([
+    {
+      content: [{
+        type: "tool_use",
+        id: "toolu_bash_alias",
+        name: "run_command",
+        input: "{\"cmd\":\"node -e \\\"console.log(123)\\\"\"}",
+      }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+    {
+      content: [{ type: "text", text: "bash repaired" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  ]);
+
+  const result = await runAgent("run command", {
+    model: "mock",
+    provider,
+    maxIterations: 3,
+    skills: [],
+    onEvent: (e) => {
+      if (e.type === "tool_call") toolCalls.push({ name: e.name, input: e.input });
+      if (e.type === "tool_result") toolResults.push(e.output);
+    },
+  });
+
+  assert.equal(result, "bash repaired");
+  assert.equal(toolCalls[0].name, "bash");
+  assert.deepEqual(toolCalls[0].input, { command: "node -e \"console.log(123)\"" });
+  assert.match(toolResults.join("\n"), /123/);
+});
+
+test("runAgent repairs apply_patch alias with raw_arguments input", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "joy-agent-repair-patch-"));
+  await mkdir(path.join(root, "src"), { recursive: true });
+  const filePath = path.join(root, "src/calc.js");
+  await writeFile(filePath, "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n", "utf8");
+  const previous = process.cwd();
+  const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+  const toolResultIds: string[] = [];
+  const patch = `--- a/src/calc.js
++++ b/src/calc.js
+@@ -1,2 +1,2 @@
+-function add(a, b) { return a - b; }
++function add(a, b) { return a + b; }
+ console.log(add(2, 3));
+`;
+  const provider = new MockProvider([
+    {
+      content: [{
+        type: "tool_use",
+        name: "apply_diff",
+        input: { raw_arguments: JSON.stringify({ diff: patch }) },
+      } as any],
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+    {
+      content: [{ type: "text", text: "patch repaired" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  ]);
+
+  try {
+    process.chdir(root);
+    const result = await runAgent("fix add", {
+      model: "mock",
+      provider,
+      maxIterations: 3,
+      skills: [],
+      onEvent: (e) => {
+        if (e.type === "tool_call") toolCalls.push({ id: e.id, name: e.name, input: e.input });
+        if (e.type === "tool_result") toolResultIds.push(e.id);
+      },
+    });
+
+    assert.equal(result, "patch repaired");
+    assert.equal(toolCalls[0].name, "apply_patch");
+    assert.deepEqual(toolCalls[0].input, { patch });
+    assert.match(toolCalls[0].id, /^toolu_repaired_0_/);
+    assert.equal(toolResultIds[0], toolCalls[0].id);
+    assert.equal(await readFile(filePath, "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+  } finally {
+    process.chdir(previous);
+  }
+});

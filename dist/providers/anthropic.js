@@ -1,3 +1,4 @@
+import { normalizeProviderResponse } from "./normalize.js";
 function toAnthropicContent(content) {
     return content;
 }
@@ -15,12 +16,12 @@ export function normalizeAnthropicResponse(resp) {
             return { type: "text", text: String(block.text ?? "") };
         return {
             type: "tool_use",
-            id: String(block.id),
-            name: String(block.name),
-            input: block.input ?? {},
+            id: block.id,
+            name: block.name,
+            input: block.input,
         };
     });
-    return {
+    const normalized = normalizeProviderResponse({
         content,
         stopReason: resp.stop_reason ?? "end_turn",
         usage: {
@@ -28,7 +29,8 @@ export function normalizeAnthropicResponse(resp) {
             outputTokens: Number(resp.usage?.output_tokens ?? 0),
         },
         raw: resp.raw,
-    };
+    });
+    return normalized.response;
 }
 export class AnthropicProvider {
     client;

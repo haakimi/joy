@@ -6,6 +6,7 @@ import type {
   ProviderRequest,
   ProviderResponse,
 } from "./types.js";
+import { normalizeProviderResponse } from "./normalize.js";
 
 function toAnthropicContent(content: ProviderMessage["content"]): any {
   return content;
@@ -19,19 +20,19 @@ function toAnthropicMessages(messages: ProviderMessage[]): Anthropic.MessagePara
 }
 
 export function normalizeAnthropicResponse(resp: any): ProviderResponse {
-  const content: ProviderContentBlock[] = (resp.content ?? [])
+  const content = (resp.content ?? [])
     .filter((block: any) => block.type === "text" || block.type === "tool_use")
     .map((block: any) => {
       if (block.type === "text") return { type: "text", text: String(block.text ?? "") };
       return {
         type: "tool_use",
-        id: String(block.id),
-        name: String(block.name),
-        input: block.input ?? {},
+        id: block.id,
+        name: block.name,
+        input: block.input,
       };
-    });
+    }) as ProviderContentBlock[];
 
-  return {
+  const normalized = normalizeProviderResponse({
     content,
     stopReason: resp.stop_reason ?? "end_turn",
     usage: {
@@ -39,7 +40,8 @@ export function normalizeAnthropicResponse(resp: any): ProviderResponse {
       outputTokens: Number(resp.usage?.output_tokens ?? 0),
     },
     raw: resp.raw,
-  };
+  } as ProviderResponse);
+  return normalized.response;
 }
 
 export class AnthropicProvider implements ModelProvider {

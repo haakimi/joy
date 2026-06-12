@@ -1,6 +1,7 @@
 import { tools, runTool, setSubagentRunner, setToolEventEmitter } from "./tools.js";
 import { discoverSkills, buildSkillsPrompt } from "./skills.js";
 import { createProvider } from "./providers/index.js";
+import { normalizeProviderResponse } from "./providers/normalize.js";
 const BASE_SYSTEM_PROMPT = `You are Joy, a terminal coding agent.
 You have local tools for reading files, listing files, globbing paths, grepping text,
 writing/editing files, applying unified diff patches, running bash commands,
@@ -125,7 +126,7 @@ export async function runAgent(userPrompt, opts) {
         if (signal?.aborted) {
             throw new Error("Aborted");
         }
-        const resp = await provider.createMessage({
+        const rawResp = await provider.createMessage({
             model: opts.model,
             maxTokens: opts.maxTokens ?? maxTokensDefault,
             system,
@@ -133,6 +134,10 @@ export async function runAgent(userPrompt, opts) {
             messages,
             signal,
         });
+        const { response: resp, diagnostics } = normalizeProviderResponse(rawResp);
+        if (diagnostics.length > 0) {
+            emit({ type: "provider_response_repaired", diagnostics });
+        }
         // Check abort after API call returns
         if (signal?.aborted) {
             throw new Error("Aborted");

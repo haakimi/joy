@@ -33,6 +33,22 @@ export type ProviderUsage = {
   outputTokens: number;
 };
 
+export type ToolRepairDiagnostic = {
+  kind:
+    | "tool_name_alias"
+    | "input_key_alias"
+    | "input_json_parsed"
+    | "raw_arguments_parsed"
+    | "tool_id_generated"
+    | "stop_reason_reconciled"
+    | "tool_input_unparseable";
+  toolId?: string;
+  toolName?: string;
+  from?: string;
+  to?: string;
+  message?: string;
+};
+
 export type ProviderRequest = {
   model: string;
   maxTokens: number;
@@ -47,6 +63,7 @@ export type ProviderResponse = {
   stopReason: ProviderStopReason;
   usage: ProviderUsage;
   raw?: unknown;
+  diagnostics?: ToolRepairDiagnostic[];
 };
 
 export interface ModelProvider {
