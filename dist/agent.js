@@ -2,6 +2,7 @@ import { tools, runTool, setSubagentRunner, setToolEventEmitter } from "./tools.
 import { discoverSkills, buildSkillsPrompt } from "./skills.js";
 import { createProvider } from "./providers/index.js";
 import { normalizeProviderResponse } from "./providers/normalize.js";
+import { COMPACT_SUMMARY_PROMPT } from "./compact.js";
 const BASE_SYSTEM_PROMPT = `You are Joy, a terminal coding agent.
 
 Intent Router + Grounded ReAct policy:
@@ -44,16 +45,6 @@ Grounding policy: inspect files before making repo-state claims. If the subtask 
 
 When you finish, provide a clear summary of what you did: files changed, key
 decisions, and any issues encountered. Be concise.`;
-const COMPACT_SUMMARY_PROMPT = `Provide a detailed summary of the conversation so far. Include:
-1. The user's original request and goal
-2. Key decisions made and why
-3. Files examined, modified, or created (with paths)
-4. Current progress and what remains to be done
-5. Any errors encountered and how they were resolved
-6. Important technical context (versions, configurations, etc.)
-
-Be thorough but concise. This summary will replace the full conversation history
-to save context space. The agent will continue working from this summary.`;
 export function collectSubagentText(events) {
     const parts = events
         .filter((e) => e.type === "assistant_text" && !e.isThinking && e.text.trim().length > 0)
@@ -72,10 +63,7 @@ setSubagentRunner(async (prompt, opts) => {
     });
     return collectSubagentText(events);
 });
-async function compressConversation(provider, model, messages, system) {
-    // Estimate tokens before compression (rough: ~4 chars per token)
-    const totalChars = messages.reduce((sum, m) => sum + JSON.stringify(m.content).length, 0);
-    const estimatedTokens = Math.round(totalChars / 4);
+async function compressConversation(provider, model, messages, system, cumulativeInputBefore) {
     const resp = await provider.createMessage({
         model,
         maxTokens: 4096,
@@ -87,8 +75,11 @@ async function compressConversation(provider, model, messages, system) {
         .filter((b) => b.type === "text")
         .map((b) => b.text)
         .join("");
-    const tokensSaved = estimatedTokens - Math.round(summary.length / 4);
-    return { summary, tokensSaved: Math.max(0, tokensSaved) };
+    // Use the provider's REAL reported input tokens for the summary request
+    // rather than a chars/4 estimate, which badly under-counts CJK text.
+    const summaryInputTokens = resp.usage.inputTokens;
+    const tokensSaved = Math.max(0, cumulativeInputBefore - summaryInputTokens);
+    return { summary, tokensSaved, summaryInputTokens };
 }
 export async function runAgent(userPrompt, opts) {
     const cfg = await import("./config.js");
@@ -167,10 +158,13 @@ export async function runAgent(userPrompt, opts) {
         // Auto-compress when approaching context limit (default: 180K tokens)
         const compactThreshold = Number(process.env.JOY_COMPACT_THRESHOLD) || 180_000;
         if (cumulativeInput > compactThreshold && opts.onCompact) {
-            const { summary, tokensSaved } = await compressConversation(provider, opts.model, messages, system);
+            const { summary, tokensSaved, summaryInputTokens } = await compressConversation(provider, opts.model, messages, system, cumulativeInput);
             emit({ type: "compact", summary, savedTokens: tokensSaved });
             messages = opts.onCompact(summary, tokensSaved);
-            cumulativeInput = Math.round(summary.length / 4);
+            // Reset the cumulative counter to the summary's REAL input-token count
+            // rather than a chars/4 estimate, so subsequent compact timing is
+            // accurate for CJK-heavy conversations.
+            cumulativeInput = summaryInputTokens;
             cumulativeOutput = 0;
         }
         messages.push({ role: "assistant", content: resp.content });

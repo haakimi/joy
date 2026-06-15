@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { discoverSkills } from "./skills.js";
+import { buildManualCompactPrompt } from "./compact.js";
 
 export interface SlashCommand {
   name: string;                         // without leading "/"
@@ -149,11 +150,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       );
       // The actual compression is handled by the REPL/App via the prompt mechanism
       return {
-        prompt:
-          "[COMPACT] Please summarize the conversation so far. Include the user's original request, " +
-          "key decisions, files modified, current progress, and what remains to be done. " +
-          "After summarizing, the conversation history will be replaced with your summary to save context space. " +
-          "Do NOT continue working on the task — just provide the summary.",
+        prompt: buildManualCompactPrompt(),
       };
     },
   },
