@@ -1,4 +1,5 @@
 import { normalizeProviderResponse } from "./normalize.js";
+import { withRetry } from "./retry.js";
 function toAnthropicContent(content) {
     return content;
 }
@@ -39,12 +40,17 @@ export class AnthropicProvider {
         this.client = client;
     }
     async createMessage(request) {
-        const resp = await this.client.messages.create({
+        const resp = await withRetry(() => this.client.messages.create({
             model: request.model,
             max_tokens: request.maxTokens,
             system: request.system,
             tools: request.tools,
             messages: toAnthropicMessages(request.messages),
+        }), {
+            signal: request.signal,
+            // Generous per-attempt timeout; a single model turn can take a while
+            // on long generations but should not hang forever.
+            timeoutMs: 180_000,
         });
         return normalizeAnthropicResponse(resp);
     }

@@ -7,6 +7,7 @@ import type {
   ProviderResponse,
 } from "./types.js";
 import { normalizeProviderResponse } from "./normalize.js";
+import { withRetry } from "./retry.js";
 
 function toAnthropicContent(content: ProviderMessage["content"]): any {
   return content;
@@ -50,13 +51,22 @@ export class AnthropicProvider implements ModelProvider {
   constructor(private readonly client: Anthropic) {}
 
   async createMessage(request: ProviderRequest): Promise<ProviderResponse> {
-    const resp = await this.client.messages.create({
-      model: request.model,
-      max_tokens: request.maxTokens,
-      system: request.system,
-      tools: request.tools,
-      messages: toAnthropicMessages(request.messages),
-    });
+    const resp = await withRetry(
+      () =>
+        this.client.messages.create({
+          model: request.model,
+          max_tokens: request.maxTokens,
+          system: request.system,
+          tools: request.tools,
+          messages: toAnthropicMessages(request.messages),
+        }),
+      {
+        signal: request.signal,
+        // Generous per-attempt timeout; a single model turn can take a while
+        // on long generations but should not hang forever.
+        timeoutMs: 180_000,
+      },
+    );
     return normalizeAnthropicResponse(resp);
   }
 }

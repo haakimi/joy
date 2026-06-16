@@ -6,11 +6,19 @@ export class MockProvider {
         this.script = script;
     }
     async createMessage(_request) {
-        const response = this.script[this.index++];
-        if (!response) {
+        const entry = this.script[this.index++];
+        if (!entry) {
             throw new Error("Mock provider has no scripted response left");
         }
-        return response;
+        if ("throw" in entry) {
+            const err = Object.assign(new Error(entry.throw), { status: entry.status });
+            throw err;
+        }
+        return entry;
+    }
+    /** Number of scripted entries consumed so far (useful for assertions). */
+    get callCount() {
+        return this.index;
     }
 }
 export function mockScriptFromEnv() {
