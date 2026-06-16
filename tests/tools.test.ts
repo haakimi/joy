@@ -178,17 +178,64 @@ test("apply_patch reports ambiguous fallback matches", async () => {
   });
 });
 
-test("apply_patch rejects file creation and deletion in v1", async () => {
+test("apply_patch creates a new file from a /dev/null oldPath", async () => {
   await withTempCwd(async (root) => {
-    await writeFixture(path.join(root, "old.txt"), "old\n");
-
-    const createResult = await runTool("apply_patch", {
+    const result = await runTool("apply_patch", {
       patch: `--- /dev/null
 +++ b/new.txt
+@@ -0,0 +1,2 @@
++line one
++line two
+`,
+    });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /created 1/);
+    assert.equal(
+      await readFile(path.join(root, "new.txt"), "utf8"),
+      "line one\nline two\n",
+    );
+  });
+});
+
+test("apply_patch create rejects when target file already exists", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, "exists.txt"), "original\n");
+
+    const result = await runTool("apply_patch", {
+      patch: `--- /dev/null
++++ b/exists.txt
 @@ -0,0 +1,1 @@
++overwritten
+`,
+    });
+
+    assert.equal(result.is_error, true);
+    assert.match(result.content, /already exists/i);
+    assert.equal(await readFile(path.join(root, "exists.txt"), "utf8"), "original\n");
+  });
+});
+
+test("apply_patch create rejects hunks with context or removal lines", async () => {
+  await withTempCwd(async (root) => {
+    const result = await runTool("apply_patch", {
+      patch: `--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
+-context
 +new
 `,
     });
+
+    assert.equal(result.is_error, true);
+    assert.match(result.content, /only additions|normal hunk/i);
+  });
+});
+
+test("apply_patch rejects file deletion", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, "old.txt"), "old\n");
+
     const deleteResult = await runTool("apply_patch", {
       patch: `--- a/old.txt
 +++ /dev/null
@@ -197,10 +244,8 @@ test("apply_patch rejects file creation and deletion in v1", async () => {
 `,
     });
 
-    assert.equal(createResult.is_error, true);
-    assert.match(createResult.content, /not supported|existing/i);
     assert.equal(deleteResult.is_error, true);
-    assert.match(deleteResult.content, /not supported|existing/i);
+    assert.match(deleteResult.content, /deletion is not supported/i);
     assert.equal(await readFile(path.join(root, "old.txt"), "utf8"), "old\n");
   });
 });
@@ -309,5 +354,38 @@ test("grep caps matches", async () => {
 
     assert.equal(result.is_error, false);
     assert.match(result.content, /truncated/i);
+  });
+});
+
+test("glob respects .gitignore entries (directories and suffixes)", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, ".gitignore"), "build/\n*.log\n");
+    await writeFixture(path.join(root, "src/index.ts"), "export {};\n");
+    await writeFixture(path.join(root, "build/out.js"), "module.exports = {};\n");
+    await writeFixture(path.join(root, "debug.log"), "log line\n");
+    await writeFixture(path.join(root, "notes.txt"), "keep me\n");
+
+    const result = await runTool("glob", { pattern: "**/*" });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /src\/index\.ts/);
+    assert.match(result.content, /notes\.txt/);
+    // build/ and *.log are gitignored, must not appear
+    assert.doesNotMatch(result.content, /build\/out\.js/);
+    assert.doesNotMatch(result.content, /debug\.log/);
+  });
+});
+
+test("grep respects .gitignore and skips ignored files", async () => {
+  await withTempCwd(async (root) => {
+    await writeFixture(path.join(root, ".gitignore"), "vendor/\n");
+    await writeFixture(path.join(root, "src/app.ts"), "const needle = 1;\n");
+    await writeFixture(path.join(root, "vendor/lib.ts"), "const needle = 2;\n");
+
+    const result = await runTool("grep", { pattern: "needle" });
+
+    assert.equal(result.is_error, false);
+    assert.match(result.content, /src\/app\.ts/);
+    assert.doesNotMatch(result.content, /vendor\/lib\.ts/);
   });
 });

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
+import ignore from "ignore";
 export const tools = [
     {
         name: "read",
@@ -133,9 +134,10 @@ export const tools = [
     },
     {
         name: "apply_patch",
-        description: "Apply a unified diff patch to existing UTF-8 text files. " +
-            "Use this for multi-line, multi-hunk, or multi-file edits. " +
-            "All hunks are validated before any file is written; file creation/deletion is not supported in v1.",
+        description: "Apply a unified diff patch to UTF-8 text files. " +
+            "Use this for multi-line, multi-hunk, or multi-file edits, or to create new files " +
+            "(oldPath = /dev/null). All hunks are validated before any file is written; " +
+            "file deletion is not supported.",
         input_schema: {
             type: "object",
             properties: {
@@ -216,7 +218,113 @@ const MAX_GREP_LINE_CHARS = 300;
 const MAX_PATCH_BYTES = 200_000;
 const MAX_PATCH_FILES = 50;
 const MAX_PATCH_HUNKS = 500;
-const IGNORED_DIRS = new Set([".git", "node_modules", "dist", "coverage", ".next", ".cache"]);
+// Cache of loaded .gitignore filters keyed by the absolute walk root.
+// Each filter merges the nearest ancestor .gitignore plus every nested
+// .gitignore found under the root so negation/override patterns resolve in
+// directory order. Re-walks under the same root reuse the cached filter.
+const ignoreCache = new Map();
+const ALWAYS_IGNORED = new Set([".git", "node_modules", "dist", "coverage", ".next", ".cache"]);
+async function buildIgnoreFilter(root) {
+    const ig = ignore();
+    // Built-in fallback: even without a .gitignore these are always skipped.
+    for (const d of ALWAYS_IGNORED)
+        ig.add(`/${d}/`);
+    // Nearest .gitignore at or above the walk root (patterns anchored to repo
+    // root). Read each level up to the first directory without one.
+    const ancestorPatterns = [];
+    let dir = root;
+    for (let depth = 0; depth < 10; depth++) {
+        const file = path.join(dir, ".gitignore");
+        try {
+            const text = await fs.readFile(file, "utf8");
+            ancestorPatterns.unshift(text);
+        }
+        catch {
+            // no .gitignore at this level
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir)
+            break;
+        dir = parent;
+        // Stop climbing once we've passed the walk root: ancestor patterns above
+        // the root still apply (repo-level .gitignore), so we keep going up.
+    }
+    if (ancestorPatterns.length)
+        ig.add(ancestorPatterns.join("\n"));
+    // Nested .gitignore files inside the root, in parent-first order, so that
+    // closer patterns can override outer ones.
+    try {
+        const nested = await collectNestedGitignores(root);
+        for (const { relDir, text } of nested) {
+            // Re-anchor nested patterns relative to root by adding them as-is; the
+            // `ignore` lib evaluates patterns relative to the root by default, so we
+            // prefix each entry's directory for path-relative correctness.
+            ig.add(rebasePatterns(text, relDir));
+        }
+    }
+    catch {
+        // ignore failures during nested discovery
+    }
+    return ig;
+}
+async function collectNestedGitignores(root, relDir = "") {
+    const out = [];
+    const abs = relDir ? path.join(root, relDir) : root;
+    let entries;
+    try {
+        entries = await fs.readdir(abs, { withFileTypes: true });
+    }
+    catch {
+        return out;
+    }
+    for (const ent of entries) {
+        if (ent.name === ".gitignore" && ent.isFile()) {
+            try {
+                const text = await fs.readFile(path.join(abs, ent.name), "utf8");
+                out.push({ relDir, text });
+            }
+            catch {
+                // skip unreadable
+            }
+        }
+        else if (ent.isDirectory() && !ALWAYS_IGNORED.has(ent.name) && !ent.name.startsWith(".")) {
+            const childRel = relDir ? `${relDir}/${ent.name}` : ent.name;
+            const child = await collectNestedGitignores(root, childRel);
+            for (const c of child)
+                out.push(c);
+        }
+    }
+    return out;
+}
+// Re-anchor a nested .gitignore's patterns so they apply relative to the
+// walk root. Each non-empty, non-comment line is treated as relative to
+// relDir; anchored patterns (leading /) are preserved anchored to relDir.
+function rebasePatterns(text, relDir) {
+    if (!relDir)
+        return text;
+    return text
+        .split(/\r?\n/)
+        .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#"))
+            return line;
+        // Negation: keep the leading ! but rebase the path after it.
+        if (trimmed.startsWith("!"))
+            return `!${relDir}/${trimmed.slice(1)}`;
+        if (trimmed.startsWith("/"))
+            return `/${relDir}${trimmed}`;
+        return `${relDir}/${trimmed}`;
+    })
+        .join("\n");
+}
+async function getIgnoreFilter(root) {
+    let cached = ignoreCache.get(root);
+    if (!cached) {
+        cached = buildIgnoreFilter(root);
+        ignoreCache.set(root, cached);
+    }
+    return cached;
+}
 function clampLimit(value, defaultValue, hardMax) {
     const n = Number(value ?? defaultValue);
     if (!Number.isFinite(n) || n <= 0)
@@ -231,9 +339,6 @@ function limitOutput(text) {
 function normalizeSlash(value) {
     return value.split(path.sep).join("/");
 }
-function isIgnoredDir(name) {
-    return IGNORED_DIRS.has(name);
-}
 function formatRelative(root, absolutePath) {
     const rel = normalizeSlash(path.relative(root, absolutePath));
     return rel || path.basename(absolutePath);
@@ -243,8 +348,21 @@ async function walkEntries(root, opts) {
     if (!rootStat.isDirectory()) {
         return { entries: [{ abs: root, rel: path.basename(root), isDir: false }], truncated: false };
     }
+    const ig = await getIgnoreFilter(root);
     const out = [];
     let truncated = false;
+    // A directory is skipped entirely (not recursed into, and not listed) when
+    // either its own path is ignored or it is a built-in always-ignored dir.
+    function shouldSkipDir(rel, name) {
+        if (ALWAYS_IGNORED.has(name))
+            return true;
+        try {
+            return ig.ignores(rel.endsWith("/") ? rel : `${rel}/`);
+        }
+        catch {
+            return false;
+        }
+    }
     async function visit(dir) {
         if (out.length >= MAX_WALK_ENTRIES) {
             truncated = true;
@@ -260,13 +378,24 @@ async function walkEntries(root, opts) {
             const abs = path.join(dir, child.name);
             const rel = formatRelative(root, abs);
             if (child.isDirectory()) {
+                if (shouldSkipDir(rel, child.name))
+                    continue;
                 if (opts.includeDirs !== false)
                     out.push({ abs, rel, isDir: true });
-                if (opts.recursive && !isIgnoredDir(child.name)) {
+                if (opts.recursive) {
                     await visit(abs);
                 }
             }
             else if (child.isFile()) {
+                let skip = false;
+                try {
+                    skip = ig.ignores(rel);
+                }
+                catch {
+                    skip = false;
+                }
+                if (skip)
+                    continue;
                 out.push({ abs, rel, isDir: false });
             }
         }
@@ -440,6 +569,18 @@ function parseHunkHeader(line) {
         newCount: Number(match[4] ?? "1"),
     };
 }
+// A create-mode hunk (oldPath /dev/null) must have no source lines: oldCount
+// should be 0 and every hunk line must be an addition. Context or removal
+// lines mean the model is actually trying to edit an existing file and should
+// use a normal update hunk instead.
+function validateCreateHunk(hunk, filePath) {
+    if (hunk.oldCount !== 0) {
+        throw new Error(`Invalid patch: create hunk for ${filePath} must have old count 0 (got ${hunk.oldCount}); use a normal hunk to edit an existing file`);
+    }
+    if (hunk.lines.some((line) => line.kind !== "add")) {
+        throw new Error(`Invalid patch: create hunk for ${filePath} must contain only additions; use a normal hunk to edit an existing file`);
+    }
+}
 function parseUnifiedPatch(patch) {
     if (!patch.trim())
         throw new Error("Invalid patch: patch must be non-empty");
@@ -463,13 +604,22 @@ function parseUnifiedPatch(patch) {
         }
         const newPath = stripDiffPrefix(lines[i].slice(4));
         i++;
-        if (oldPath === "/dev/null" || newPath === "/dev/null") {
-            throw new Error("Invalid patch: file creation and deletion are not supported in apply_patch v1; patch existing files only");
+        // File creation: oldPath is /dev/null. Deletion (newPath /dev/null) is
+        // still unsupported — edits to existing files must use normal hunks.
+        if (newPath === "/dev/null") {
+            throw new Error("Invalid patch: file deletion is not supported in apply_patch");
         }
-        if (oldPath !== newPath) {
-            throw new Error("Invalid patch: renames are not supported in apply_patch v1");
+        const isCreate = oldPath === "/dev/null";
+        if (!isCreate && oldPath !== newPath) {
+            throw new Error("Invalid patch: renames are not supported in apply_patch");
         }
-        const patchFile = { oldPath, newPath, path: newPath, hunks: [] };
+        const patchFile = {
+            oldPath,
+            newPath,
+            path: newPath,
+            mode: isCreate ? "create" : "update",
+            hunks: [],
+        };
         while (i < lines.length) {
             if (lines[i].startsWith("--- "))
                 break;
@@ -503,6 +653,9 @@ function parseUnifiedPatch(patch) {
             }
             if (hunk.lines.length === 0)
                 throw new Error("Invalid patch: hunk must contain at least one line");
+            if (patchFile.mode === "create") {
+                validateCreateHunk(hunk, patchFile.path);
+            }
             patchFile.hunks.push(hunk);
         }
         if (patchFile.hunks.length === 0)
@@ -572,6 +725,20 @@ function applyFileHunks(original, patchFile) {
     }
     return { text: joinTextLines(lines, split.trailingNewline), added, removed };
 }
+// Assemble the content of a newly created file from its create-mode hunks.
+// All hunk lines are guaranteed additions (validated upstream); the file ends
+// with a trailing newline, matching typical source-file convention.
+function assembleCreatedFile(patchFile) {
+    const allAddLines = [];
+    for (const hunk of patchFile.hunks) {
+        for (const line of hunk.lines) {
+            // Only add lines exist in create hunks (validated by validateCreateHunk).
+            if (line.kind === "add")
+                allAddLines.push(line.text);
+        }
+    }
+    return joinTextLines(allAddLines, true);
+}
 function assertPathInsideCwd(absPath) {
     const cwd = process.cwd();
     const rel = path.relative(cwd, absPath);
@@ -586,9 +753,32 @@ async function applyPatchTool(input) {
     let added = 0;
     let removed = 0;
     let hunkCount = 0;
+    let createdCount = 0;
     for (const file of files) {
         const abs = resolvePath(file.path);
         assertPathInsideCwd(abs);
+        if (file.mode === "create") {
+            // Reject if the target already exists — a create must not silently
+            // overwrite an unread file. Editing an existing file belongs to a
+            // normal update hunk.
+            let exists = false;
+            try {
+                await fs.stat(abs);
+                exists = true;
+            }
+            catch {
+                exists = false;
+            }
+            if (exists) {
+                throw new Error(`Cannot create file: ${file.path} already exists; use a normal hunk to edit an existing file`);
+            }
+            const text = assembleCreatedFile(file);
+            updates.push({ abs, text, create: true });
+            added += text.split("\n").length;
+            hunkCount += file.hunks.length;
+            createdCount++;
+            continue;
+        }
         const stat = await fs.stat(abs);
         if (!stat.isFile())
             throw new Error(`Patch target is not a file: ${file.path}`);
@@ -596,16 +786,20 @@ async function applyPatchTool(input) {
         if (buf.includes(0))
             throw new Error(`Patch target appears to be binary: ${file.path}`);
         const applied = applyFileHunks(buf.toString("utf8"), file);
-        updates.push({ abs, text: applied.text });
+        updates.push({ abs, text: applied.text, create: false });
         added += applied.added;
         removed += applied.removed;
         hunkCount += file.hunks.length;
     }
     for (const update of updates) {
+        if (update.create) {
+            await fs.mkdir(path.dirname(update.abs), { recursive: true });
+        }
         await fs.writeFile(update.abs, update.text, "utf8");
     }
+    const createdNote = createdCount > 0 ? `, created ${createdCount}` : "";
     return {
-        content: `Applied patch to ${files.length} file${files.length === 1 ? "" : "s"} (${hunkCount} hunk${hunkCount === 1 ? "" : "s"}, +${added} -${removed})`,
+        content: `Applied patch to ${files.length} file${files.length === 1 ? "" : "s"} (${hunkCount} hunk${hunkCount === 1 ? "" : "s"}, +${added} -${removed}${createdNote})`,
         is_error: false,
     };
 }
