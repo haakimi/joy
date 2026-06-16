@@ -34,6 +34,9 @@
   "verify": {
     "command": "node add.js",
     "expectExitCode": 0,
-    "expectStdoutIncludes": "5"
+    "expectStdoutIncludes": "5",
+    "expectToolCalls": [
+      { "name": "edit", "inputIncludes": { "path": "add.js" } }
+    ]
   }
 }

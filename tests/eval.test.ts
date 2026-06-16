@@ -118,6 +118,37 @@ test("loadEvalCases reads case manifests from evals/cases/*", async () => {
   assert.deepEqual(cases[0].files, { "src/app.js": "console.log('bug')\n" });
 });
 
+test("loadEvalCases preserves tool call expectations", async () => {
+  const root = await makeCaseRoot();
+  const caseDir = path.join(root, "cases", "tool-expectations");
+  await mkdir(caseDir, { recursive: true });
+  await writeFile(path.join(caseDir, "case.json"), JSON.stringify({
+    name: "tool-expectations",
+    prompt: "Fix add.js.",
+    provider: "mock",
+    model: "mock",
+    files: {},
+    mockResponses: [
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 } }
+    ],
+    verify: {
+      command: "true",
+      expectExitCode: 0,
+      expectToolCalls: [
+        { name: "read", inputIncludes: { path: "add.js" } },
+        { name: "edit", inputIncludes: { path: "add.js" } }
+      ]
+    }
+  }), "utf8");
+
+  const cases = await loadEvalCases(path.join(root, "cases"));
+
+  assert.deepEqual(cases[0].verify.expectToolCalls, [
+    { name: "read", inputIncludes: { path: "add.js" } },
+    { name: "edit", inputIncludes: { path: "add.js" } }
+  ]);
+});
+
 test("runEvalCase prepares files, runs mock agent, and verifies expected output", async () => {
   const root = await makeCaseRoot();
   const loaded = await createBugfixCase(root);
@@ -128,6 +159,17 @@ test("runEvalCase prepares files, runs mock agent, and verifies expected output"
   assert.equal(result.verify.exitCode, 0);
   assert.match(result.verify.stdout, /5/);
   assert.equal(result.kept, true);
+  assert.deepEqual(result.toolCalls, [
+    {
+      id: "toolu_edit",
+      name: "edit",
+      input: {
+        path: "add.js",
+        old_string: "return a - b;",
+        new_string: "return a + b;"
+      }
+    }
+  ]);
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
 });
 
@@ -172,13 +214,19 @@ test("runEvalCase supports repaired tool-call aliases", async () => {
         usage: { inputTokens: 1, outputTokens: 1 }
       }
     ],
-    verify: { command: "node add.js", expectExitCode: 0, expectStdoutIncludes: "5" }
+    verify: {
+      command: "node add.js",
+      expectExitCode: 0,
+      expectStdoutIncludes: "5",
+      expectToolCalls: [{ name: "apply_patch" }]
+    }
   }), "utf8");
   const [loaded] = await loadEvalCases(path.join(root, "cases"));
 
   const result = await runEvalCase(loaded, { workRoot: path.join(root, "work"), keepRuns: true });
 
   assert.equal(result.status, "passed");
+  assert.equal(result.toolCalls[0].name, "apply_patch");
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
 });
 
@@ -224,6 +272,25 @@ test("runEvalCase supports GLM-style arguments tool input", async () => {
 
   assert.equal(result.status, "passed");
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+});
+
+test("runEvalCase fails when expected tool calls are missing", async () => {
+  const root = await makeCaseRoot();
+  const loaded = await createBugfixCase(root, {
+    command: "node add.js",
+    expectExitCode: 0,
+    expectStdoutIncludes: "5",
+    expectToolCalls: [
+      { name: "read", inputIncludes: { path: "add.js" } }
+    ]
+  });
+
+  const result = await runEvalCase(loaded, { workRoot: path.join(root, "work") });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.kept, true);
+  assert.match(result.failures.join("\n"), /expected tool call #1 read/);
+  assert.match(result.failures.join("\n"), /actual calls: edit/);
 });
 
 test("checked-in GLM compatibility eval cases are discoverable", async () => {

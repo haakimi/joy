@@ -38,7 +38,57 @@ async function createPassingCase(root: string) {
         usage: { inputTokens: 1, outputTokens: 1 }
       }
     ],
-    verify: { command: "node add.js", expectExitCode: 0, expectStdoutIncludes: "5" }
+    verify: {
+      command: "node add.js",
+      expectExitCode: 0,
+      expectStdoutIncludes: "5",
+      expectToolCalls: [
+        { name: "edit", inputIncludes: { path: "add.js" } }
+      ]
+    }
+  }), "utf8");
+}
+
+async function createToolExpectationFailureCase(root: string) {
+  const caseDir = path.join(root, "cases", "tool-expectation-failure");
+  await mkdir(caseDir, { recursive: true });
+  await writeFile(path.join(caseDir, "case.json"), JSON.stringify({
+    name: "tool-expectation-failure",
+    prompt: "Fix add.js so add(2, 3) prints 5.",
+    provider: "mock",
+    model: "mock",
+    files: {
+      "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+    },
+    mockResponses: [
+      {
+        content: [{
+          type: "tool_use",
+          id: "toolu_edit",
+          name: "edit",
+          input: {
+            path: "add.js",
+            old_string: "return a - b;",
+            new_string: "return a + b;"
+          }
+        }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      },
+      {
+        content: [{ type: "text", text: "Fixed add.js." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      }
+    ],
+    verify: {
+      command: "node add.js",
+      expectExitCode: 0,
+      expectStdoutIncludes: "5",
+      expectToolCalls: [
+        { name: "read", inputIncludes: { path: "add.js" } }
+      ]
+    }
   }), "utf8");
 }
 
@@ -135,8 +185,28 @@ test("runEvalCli --json prints one JSON summary without human output", async () 
   assert.equal(parsed.results[0].caseName, "single-file-bugfix");
   assert.equal(parsed.results[0].status, "passed");
   assert.equal(parsed.results[0].provider, "mock");
+  assert.equal(parsed.results[0].toolCalls[0].name, "edit");
+  assert.equal(parsed.results[0].toolCalls[0].input.path, "add.js");
   // Ensure no human PASS/FAIL text
   assert.doesNotMatch(output, /PASS/);
+});
+
+test("runEvalCli prints tool expectation failures in human output", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "joy-eval-cli-"));
+  await createToolExpectationFailureCase(root);
+  let output = "";
+
+  const exitCode = await runEvalCli({
+    casesDir: path.join(root, "cases"),
+    workRoot: path.join(root, "work"),
+    write: (text) => { output += text; },
+  });
+
+  assert.equal(exitCode, 1);
+  assert.match(output, /FAIL tool-expectation-failure/);
+  assert.match(output, /expected tool call #1 read/);
+  assert.match(output, /actual calls: edit/);
+  assert.match(output, /work dir:/);
 });
 
 test("runEvalCli --keep-runs keeps passing run directories", async () => {

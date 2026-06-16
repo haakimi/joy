@@ -46,6 +46,7 @@ export async function runEvalCli(opts: EvalCliOptions = {}): Promise<number> {
     kept: boolean;
     failures: string[];
     verify: { command: string; exitCode: number | null; stdout: string; stderr: string };
+    toolCalls: Array<{ id: string; name: string; input: unknown }>;
   }> = [];
 
   for (const testCase of selected) {
@@ -66,6 +67,7 @@ export async function runEvalCli(opts: EvalCliOptions = {}): Promise<number> {
         kept: result.kept,
         failures: result.failures,
         verify: result.verify,
+        toolCalls: result.toolCalls,
       });
     } else {
       if (result.status === "passed") {

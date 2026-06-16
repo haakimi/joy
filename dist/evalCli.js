@@ -37,6 +37,7 @@ export async function runEvalCli(opts = {}) {
                 kept: result.kept,
                 failures: result.failures,
                 verify: result.verify,
+                toolCalls: result.toolCalls,
             });
         }
         else {

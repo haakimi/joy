@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { runAgent } from "./agent.js";
 import { defaultModelForProvider } from "./providers/index.js";
 import { MockProvider } from "./providers/mock.js";
@@ -36,8 +37,27 @@ function normalizeEvalCase(parsed, dir) {
             expectExitCode: parsed.verify?.expectExitCode,
             expectStdoutIncludes: parsed.verify?.expectStdoutIncludes,
             expectStderrIncludes: parsed.verify?.expectStderrIncludes,
+            expectToolCalls: normalizeExpectedToolCalls(parsed.verify?.expectToolCalls),
         },
     };
+}
+function normalizeExpectedToolCalls(value) {
+    if (!Array.isArray(value))
+        return undefined;
+    const calls = [];
+    for (const entry of value) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+            continue;
+        const raw = entry;
+        const name = typeof raw.name === "string" ? raw.name : "";
+        if (!name)
+            continue;
+        const inputIncludes = raw.inputIncludes && typeof raw.inputIncludes === "object" && !Array.isArray(raw.inputIncludes)
+            ? { ...raw.inputIncludes }
+            : undefined;
+        calls.push(inputIncludes ? { name, inputIncludes } : { name });
+    }
+    return calls;
 }
 function normalizeProvider(value) {
     const s = String(value).toLowerCase();
@@ -53,6 +73,7 @@ export async function runEvalCase(testCase, opts = {}) {
     await writeInitialFiles(workDir, testCase.files);
     const previousCwd = process.cwd();
     let agentResult = "";
+    const toolCalls = [];
     try {
         process.chdir(workDir);
         agentResult = await runAgent(testCase.prompt, {
@@ -60,13 +81,21 @@ export async function runEvalCase(testCase, opts = {}) {
             provider: providerForCase(testCase, provider),
             model,
             skills: [],
+            onEvent: (event) => {
+                if (event.type === "tool_call") {
+                    toolCalls.push({ id: event.id, name: event.name, input: event.input });
+                }
+            },
         });
     }
     finally {
         process.chdir(previousCwd);
     }
     const verify = await runCommand(testCase.verify.command, workDir);
-    const failures = checkVerify(testCase.verify, verify);
+    const failures = [
+        ...checkVerify(testCase.verify, verify),
+        ...checkToolCalls(testCase.verify.expectToolCalls, toolCalls),
+    ];
     const status = failures.length === 0 ? "passed" : "failed";
     const kept = opts.keepRuns === true || status === "failed";
     if (!kept) {
@@ -81,6 +110,7 @@ export async function runEvalCase(testCase, opts = {}) {
         kept,
         agentResult,
         verify,
+        toolCalls,
         failures,
     };
 }
@@ -139,6 +169,44 @@ function checkVerify(spec, result) {
         failures.push(`expected stderr to include ${JSON.stringify(spec.expectStderrIncludes)}`);
     }
     return failures;
+}
+function checkToolCalls(expected, actual) {
+    if (!expected || expected.length === 0)
+        return [];
+    const failures = [];
+    let cursor = 0;
+    for (let i = 0; i < expected.length; i++) {
+        const exp = expected[i];
+        let matched = false;
+        for (let j = cursor; j < actual.length; j++) {
+            if (toolCallMatches(exp, actual[j])) {
+                cursor = j + 1;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            failures.push(formatToolCallFailure(i, exp, actual));
+        }
+    }
+    return failures;
+}
+function toolCallMatches(expected, actual) {
+    if (actual.name !== expected.name)
+        return false;
+    if (!expected.inputIncludes)
+        return true;
+    if (!actual.input || typeof actual.input !== "object" || Array.isArray(actual.input))
+        return false;
+    const input = actual.input;
+    return Object.entries(expected.inputIncludes).every(([key, value]) => Object.prototype.hasOwnProperty.call(input, key) && isDeepStrictEqual(input[key], value));
+}
+function formatToolCallFailure(index, expected, actual) {
+    const inputPart = expected.inputIncludes
+        ? ` with inputIncludes ${JSON.stringify(expected.inputIncludes)}`
+        : "";
+    const actualNames = actual.length > 0 ? actual.map((call) => call.name).join(", ") : "none";
+    return `expected tool call #${index + 1} ${expected.name}${inputPart}; actual calls: ${actualNames}`;
 }
 function safeName(name) {
     const safe = name.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");

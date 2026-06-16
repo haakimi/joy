@@ -101,7 +101,24 @@ Each eval case is a directory with a `case.json` manifest containing:
 - `provider` / `model` — usually `mock` / `mock` for deterministic local tests
 - `files` — initial workspace files written into an isolated temp run directory
 - `mockResponses` — scripted provider responses, including tool calls
-- `verify` — a shell command plus expected exit code/stdout/stderr checks
+- `verify` — a shell command plus expected exit code/stdout/stderr checks, and optional normalized tool-call checks
+
+`verify.expectToolCalls` can assert that Joy actually used expected tools during the run:
+
+```json
+{
+  "verify": {
+    "command": "node add.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "5",
+    "expectToolCalls": [
+      { "name": "edit", "inputIncludes": { "path": "add.js" } }
+    ]
+  }
+}
+```
+
+Tool-call expectations match the normalized tool calls emitted by Joy after provider-response repair. They are ordered subsequences, extra tool calls are allowed, and `inputIncludes` is a top-level partial input match. Use normalized Joy tool names such as `read`, `grep`, `edit`, `apply_patch`, and `bash`.
 
 Built-in cases:
 - `apply-patch-bugfix` — Chinese prompt plus unified-diff patch edit.
