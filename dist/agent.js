@@ -64,22 +64,188 @@ setSubagentRunner(async (prompt, opts) => {
     return collectSubagentText(events);
 });
 async function compressConversation(provider, model, messages, system, cumulativeInputBefore) {
-    const resp = await provider.createMessage({
-        model,
-        maxTokens: 4096,
-        system: `${system}\n\n${COMPACT_SUMMARY_PROMPT}`,
-        tools: [],
-        messages,
-    });
-    const summary = resp.content
-        .filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("");
-    // Use the provider's REAL reported input tokens for the summary request
-    // rather than a chars/4 estimate, which badly under-counts CJK text.
-    const summaryInputTokens = resp.usage.inputTokens;
-    const tokensSaved = Math.max(0, cumulativeInputBefore - summaryInputTokens);
-    return { summary, tokensSaved, summaryInputTokens };
+    // Keep the most recent messages verbatim so the agent does not lose
+    // immediate context (a file it just read, a tool result it is acting on).
+    // Only the earlier history is summarized.
+    const recentKeep = Number(process.env.JOY_COMPACT_KEEP_RECENT) || 6;
+    // A tool_use must stay paired with its tool_result, or the provider will
+    // reject the messages. Walk backwards from the split point and extend the
+    // "recent" window until tool_use/tool_result pairs are balanced.
+    let splitIdx = Math.max(0, messages.length - recentKeep);
+    splitIdx = balanceToolPairs(messages, splitIdx);
+    let toCompress = messages.slice(0, splitIdx);
+    let recent = messages.slice(splitIdx);
+    // If the conversation is shorter than the recent-keep window but still over
+    // the token threshold (for example, one very large user prompt), summarize the
+    // whole history. Skipping here would leave Joy unable to compact the exact
+    // cases where compaction is most needed.
+    if (toCompress.length === 0 && messages.length > 0) {
+        toCompress = messages;
+        recent = [];
+    }
+    // Nothing to summarize.
+    if (toCompress.length === 0)
+        return null;
+    // Build a compact, tool-free system prompt for the summary call: the full
+    // tool catalog and skills block are irrelevant to summarization and would
+    // just waste tokens. Inject the live working state (current plan, last
+    // error, recently edited files) so the model cannot drop it.
+    const workingState = extractWorkingState(messages, recent);
+    const summarySystem = `${COMPACT_SUMMARY_PROMPT}${workingState ? `\n\n## Current Working State (must be preserved)\n${workingState}` : ""}`;
+    try {
+        const resp = await provider.createMessage({
+            model,
+            maxTokens: 4096,
+            system: summarySystem,
+            tools: [],
+            messages: toCompress,
+        });
+        // A truncated summary is worse than no summary: it would silently replace
+        // complete history with a half-finished handoff. If the model hit the
+        // output limit, skip compaction and keep the original history.
+        if (resp.stopReason === "max_tokens") {
+            return null;
+        }
+        const summary = resp.content
+            .filter((b) => b.type === "text")
+            .map((b) => b.text)
+            .join("");
+        if (!summary.trim()) {
+            // Empty summary is useless — skip compaction rather than wiping real
+            // history with nothing.
+            return null;
+        }
+        const summaryInputTokens = resp.usage.inputTokens;
+        const tokensSaved = Math.max(0, cumulativeInputBefore - summaryInputTokens);
+        return { summary, recent, tokensSaved, summaryInputTokens };
+    }
+    catch (err) {
+        // Compaction is an optimization, not a requirement: a failed summary
+        // request (network, rate limit, etc.) must NOT abort the whole task.
+        // Skip compaction this turn and keep working with the original history.
+        return null;
+    }
+}
+// Move the split index forward (toward 0) until the "to compress" prefix ends
+// on a balanced tool boundary: every tool_use in the kept tail must have its
+// matching tool_result, and we never split inside a tool_use/tool_result pair.
+function balanceToolPairs(messages, splitIdx) {
+    let idx = splitIdx;
+    // If the message just BEFORE the split is a tool_use (assistant) without its
+    // result in the prefix, the result must be in the tail — extend tail back.
+    // Simpler robust rule: never start the "recent" window with a tool_result
+    // whose tool_use landed in the compressed part. Walk back while the first
+    // recent message is a tool_result.
+    while (idx > 0 && isToolResultMessage(messages[idx])) {
+        idx--;
+    }
+    // Also ensure we don't end the compressed prefix on a dangling tool_use
+    // (assistant message containing tool_use blocks) whose results are in recent.
+    while (idx > 0 && messages[idx - 1] && hasToolUse(messages[idx - 1]) && !hasMatchingResultInPrefix(messages, idx - 1)) {
+        idx--;
+    }
+    return idx;
+}
+function isToolResultMessage(m) {
+    return Array.isArray(m.content) && m.content.some((b) => typeof b === "object" && b !== null && b.type === "tool_result");
+}
+function hasToolUse(m) {
+    return Array.isArray(m.content) && m.content.some((b) => typeof b === "object" && b !== null && b.type === "tool_use");
+}
+function hasMatchingResultInPrefix(messages, useIdx) {
+    const useMsg = messages[useIdx];
+    if (!useMsg || !Array.isArray(useMsg.content))
+        return true;
+    const ids = new Set();
+    for (const b of useMsg.content) {
+        if (typeof b === "object" && b !== null && b.type === "tool_use") {
+            ids.add(b.id);
+        }
+    }
+    if (ids.size === 0)
+        return true;
+    // Look for matching tool_result anywhere after useIdx (in the prefix slice).
+    for (let j = useIdx + 1; j < messages.length; j++) {
+        const c = messages[j].content;
+        if (!Array.isArray(c))
+            continue;
+        for (const b of c) {
+            if (typeof b === "object" && b !== null && b.type === "tool_result" && ids.has(b.tool_use_id)) {
+                ids.delete(b.tool_use_id);
+            }
+        }
+    }
+    return ids.size === 0;
+}
+// Extract a compact snapshot of what the agent is actively working on, so the
+// summarizer is forced to preserve it instead of possibly glossing over it.
+function extractWorkingState(messages, recent) {
+    const lines = [];
+    // Current plan (most recent update_plan tool call).
+    const plan = findLastToolInput(messages, "update_plan");
+    if (plan && Array.isArray(plan.plan) && plan.plan.length > 0) {
+        lines.push("Current plan:");
+        for (const step of plan.plan) {
+            lines.push(`  - [${step.status ?? "pending"}] ${step.step ?? ""}`);
+        }
+    }
+    // Last error from a tool result.
+    const lastErr = findLastToolError(recent.concat(messages));
+    if (lastErr) {
+        lines.push(`Last error observed:\n  ${lastErr.slice(0, 500)}`);
+    }
+    // Recently touched file paths (deduped, last 10).
+    const files = findRecentFilePaths(recent.concat(messages), 10);
+    if (files.length > 0) {
+        lines.push(`Recently touched files: ${files.join(", ")}`);
+    }
+    return lines.join("\n");
+}
+function findLastToolInput(messages, toolName) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const c = messages[i].content;
+        if (!Array.isArray(c))
+            continue;
+        for (const b of c) {
+            if (typeof b === "object" && b !== null && b.type === "tool_use" && b.name === toolName) {
+                return b.input;
+            }
+        }
+    }
+    return undefined;
+}
+function findLastToolError(messages) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const c = messages[i].content;
+        if (!Array.isArray(c))
+            continue;
+        for (const b of c) {
+            if (typeof b === "object" && b !== null && b.type === "tool_result" && b.is_error) {
+                return String(b.content ?? "");
+            }
+        }
+    }
+    return undefined;
+}
+function findRecentFilePaths(messages, limit) {
+    const paths = [];
+    const seen = new Set();
+    const fileTools = new Set(["read", "write", "edit", "apply_patch"]);
+    for (let i = messages.length - 1; i >= 0 && paths.length < limit; i--) {
+        const c = messages[i].content;
+        if (!Array.isArray(c))
+            continue;
+        for (const b of c) {
+            if (typeof b === "object" && b !== null && b.type === "tool_use" && fileTools.has(b.name)) {
+                const p = b.input?.path ?? b.input?.file_path;
+                if (typeof p === "string" && !seen.has(p)) {
+                    seen.add(p);
+                    paths.push(p);
+                }
+            }
+        }
+    }
+    return paths;
 }
 export async function runAgent(userPrompt, opts) {
     const cfg = await import("./config.js");
@@ -120,6 +286,11 @@ export async function runAgent(userPrompt, opts) {
     const maxIters = opts.maxIterations ?? 25;
     let cumulativeInput = 0;
     let cumulativeOutput = 0;
+    // Set right after a compaction so that, on the next turn, cumulativeInput is
+    // re-baselined from that turn's REAL reported input tokens (which already
+    // include the compacted summary + current messages) instead of carrying over
+    // the stale pre-compaction count.
+    let justCompacted = false;
     for (let i = 1; i <= maxIters; i++) {
         const turnStart = Date.now();
         let toolsThisTurn = 0;
@@ -146,7 +317,19 @@ export async function runAgent(userPrompt, opts) {
         }
         const inT = resp.usage.inputTokens;
         const outT = resp.usage.outputTokens;
-        cumulativeInput += inT;
+        if (justCompacted) {
+            // The previous turn compacted history. This turn's reported input tokens
+            // already reflect the FULL post-compaction context (summary + system +
+            // tools + current messages), so it is the accurate size — use it directly
+            // as the new cumulative baseline instead of carrying over the stale
+            // pre-compaction count, which was far too high and would re-trigger
+            // compaction at once.
+            cumulativeInput = inT;
+            justCompacted = false;
+        }
+        else {
+            cumulativeInput += inT;
+        }
         cumulativeOutput += outT;
         emit({
             type: "usage",
@@ -158,14 +341,23 @@ export async function runAgent(userPrompt, opts) {
         // Auto-compress when approaching context limit (default: 180K tokens)
         const compactThreshold = Number(process.env.JOY_COMPACT_THRESHOLD) || 180_000;
         if (cumulativeInput > compactThreshold && opts.onCompact) {
-            const { summary, tokensSaved, summaryInputTokens } = await compressConversation(provider, opts.model, messages, system, cumulativeInput);
-            emit({ type: "compact", summary, savedTokens: tokensSaved });
-            messages = opts.onCompact(summary, tokensSaved);
-            // Reset the cumulative counter to the summary's REAL input-token count
-            // rather than a chars/4 estimate, so subsequent compact timing is
-            // accurate for CJK-heavy conversations.
-            cumulativeInput = summaryInputTokens;
-            cumulativeOutput = 0;
+            const compressed = await compressConversation(provider, opts.model, messages, system, cumulativeInput);
+            if (compressed) {
+                const { summary, recent, tokensSaved } = compressed;
+                emit({ type: "compact", summary, savedTokens: tokensSaved });
+                // Wrap the summary as a single user message (UI layer controls format),
+                // then append the verbatim recent window so the agent keeps its
+                // immediate working context (file just read, tool result in progress).
+                const summaryMessages = opts.onCompact(summary, tokensSaved);
+                messages = [...summaryMessages, ...recent];
+                cumulativeInput = 0;
+                cumulativeOutput = 0;
+                justCompacted = true;
+            }
+            // If compressed === null, compaction failed (or produced an empty
+            // summary): skip it and keep working with the original history. The
+            // cumulative counters stay as-is so we may retry compaction later, once
+            // budget allows.
         }
         messages.push({ role: "assistant", content: resp.content });
         const reason = resp.stopReason;
