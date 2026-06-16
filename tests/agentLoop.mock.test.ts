@@ -222,6 +222,61 @@ test("runAgent repairs bash alias with stringified JSON input", async () => {
   assert.match(toolResults.join("\n"), /123/);
 });
 
+test("runAgent repairs GLM-style arguments input and executes edit", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "joy-agent-glm-arguments-"));
+  const filePath = path.join(root, "add.js");
+  await writeFile(filePath, "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n", "utf8");
+  const previous = process.cwd();
+  const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+  const provider = new MockProvider([
+    {
+      content: [{
+        type: "tool_use",
+        name: "edit",
+        input: {
+          arguments: JSON.stringify({
+            path: "add.js",
+            old_string: "return a - b;",
+            new_string: "return a + b;",
+          }),
+        },
+      } as any],
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+    {
+      content: [{ type: "text", text: "edit repaired" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 12, outputTokens: 3 },
+    },
+  ]);
+
+  try {
+    process.chdir(root);
+    const result = await runAgent("fix add", {
+      model: "mock",
+      provider,
+      maxIterations: 3,
+      skills: [],
+      onEvent: (e) => {
+        if (e.type === "tool_call") toolCalls.push({ id: e.id, name: e.name, input: e.input });
+      },
+    });
+
+    assert.equal(result, "edit repaired");
+    assert.equal(toolCalls[0].name, "edit");
+    assert.deepEqual(toolCalls[0].input, {
+      path: "add.js",
+      old_string: "return a - b;",
+      new_string: "return a + b;",
+    });
+    assert.match(toolCalls[0].id, /^toolu_repaired_0_/);
+    assert.equal(await readFile(filePath, "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+  } finally {
+    process.chdir(previous);
+  }
+});
+
 test("runAgent repairs apply_patch alias with raw_arguments input", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "joy-agent-repair-patch-"));
   await mkdir(path.join(root, "src"), { recursive: true });

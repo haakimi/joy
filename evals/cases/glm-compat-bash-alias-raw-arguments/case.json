@@ -1,0 +1,32 @@
+{
+  "name": "glm-compat-bash-alias-raw-arguments",
+  "prompt": "Create a marker file named glm-marker.txt containing glm-bash-ok. The mock model will use a GLM-like shell call.",
+  "provider": "mock",
+  "model": "mock",
+  "files": {},
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "name": "shell",
+          "input": {
+            "raw_arguments": "{\"cmd\":\"node -e \\\"require('fs').writeFileSync('glm-marker.txt', 'glm-bash-ok\\\\n')\\\"\"}"
+          }
+        }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [{ "type": "text", "text": "Created marker file." }],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "cat glm-marker.txt",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "glm-bash-ok"
+  }
+}

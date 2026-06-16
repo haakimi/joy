@@ -182,6 +182,59 @@ test("runEvalCase supports repaired tool-call aliases", async () => {
   assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
 });
 
+test("runEvalCase supports GLM-style arguments tool input", async () => {
+  const root = await makeCaseRoot();
+  const caseDir = path.join(root, "cases", "glm-compat-edit-json-arguments");
+  await mkdir(caseDir, { recursive: true });
+  await writeFile(path.join(caseDir, "case.json"), JSON.stringify({
+    name: "glm-compat-edit-json-arguments",
+    prompt: "Fix add.js using GLM-style arguments.",
+    provider: "mock",
+    model: "mock",
+    files: {
+      "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+    },
+    mockResponses: [
+      {
+        content: [{
+          type: "tool_use",
+          name: "edit",
+          input: {
+            arguments: JSON.stringify({
+              path: "add.js",
+              old_string: "return a - b;",
+              new_string: "return a + b;"
+            })
+          }
+        }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      },
+      {
+        content: [{ type: "text", text: "Repaired arguments and edited." }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 }
+      }
+    ],
+    verify: { command: "node add.js", expectExitCode: 0, expectStdoutIncludes: "5" }
+  }), "utf8");
+  const [loaded] = await loadEvalCases(path.join(root, "cases"));
+
+  const result = await runEvalCase(loaded, { workRoot: path.join(root, "work"), keepRuns: true });
+
+  assert.equal(result.status, "passed");
+  assert.equal(await readFile(path.join(result.workDir, "add.js"), "utf8"), "function add(a, b) { return a + b; }\nconsole.log(add(2, 3));\n");
+});
+
+test("checked-in GLM compatibility eval cases are discoverable", async () => {
+  const cases = await loadEvalCases(path.resolve("evals/cases"));
+  const names = cases.map((c) => c.name);
+
+  assert.ok(names.includes("glm-compat-edit-json-arguments"));
+  assert.ok(names.includes("glm-compat-bash-alias-raw-arguments"));
+  assert.ok(names.includes("glm-compat-apply-diff-arguments"));
+});
+
 test("runEvalCase deletes passing run directories by default", async () => {
   const root = await makeCaseRoot();
   const loaded = await createBugfixCase(root);

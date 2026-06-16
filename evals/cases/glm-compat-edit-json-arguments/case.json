@@ -1,0 +1,34 @@
+{
+  "name": "glm-compat-edit-json-arguments",
+  "prompt": "Fix add.js so add(2, 3) prints 5. The mock model will use GLM-like JSON arguments.",
+  "provider": "mock",
+  "model": "mock",
+  "files": {
+    "add.js": "function add(a, b) { return a - b; }\nconsole.log(add(2, 3));\n"
+  },
+  "mockResponses": [
+    {
+      "content": [
+        {
+          "type": "tool_use",
+          "name": "edit",
+          "input": {
+            "arguments": "{\"path\":\"add.js\",\"old_string\":\"return a - b;\",\"new_string\":\"return a + b;\"}"
+          }
+        }
+      ],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    },
+    {
+      "content": [{ "type": "text", "text": "Fixed add.js using parsed arguments." }],
+      "stopReason": "end_turn",
+      "usage": { "inputTokens": 1, "outputTokens": 1 }
+    }
+  ],
+  "verify": {
+    "command": "node add.js",
+    "expectExitCode": 0,
+    "expectStdoutIncludes": "5"
+  }
+}

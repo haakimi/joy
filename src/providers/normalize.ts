@@ -89,6 +89,22 @@ function parseToolInput(input: unknown, diagnostics: ToolRepairDiagnostic[], too
       diagnostics.push({ kind: "tool_input_unparseable", toolId, toolName, message: "parsed raw_arguments was not an object" });
       return {};
     }
+
+    const args = input.arguments;
+    if (typeof args === "string") {
+      try {
+        const parsed = JSON.parse(args);
+        if (isPlainObject(parsed)) {
+          diagnostics.push({ kind: "arguments_parsed", toolId, toolName });
+          return parsed;
+        }
+      } catch (err: any) {
+        diagnostics.push({ kind: "tool_input_unparseable", toolId, toolName, message: err?.message ?? String(err) });
+        return {};
+      }
+      diagnostics.push({ kind: "tool_input_unparseable", toolId, toolName, message: "parsed arguments was not an object" });
+      return {};
+    }
     return { ...input };
   }
 

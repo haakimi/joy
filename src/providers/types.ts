@@ -39,6 +39,7 @@ export type ToolRepairDiagnostic = {
     | "input_key_alias"
     | "input_json_parsed"
     | "raw_arguments_parsed"
+    | "arguments_parsed"
     | "tool_id_generated"
     | "stop_reason_reconciled"
     | "tool_input_unparseable";

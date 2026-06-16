@@ -68,6 +68,27 @@ test("parses stringified JSON and raw_arguments tool inputs", () => {
   assert.ok(diagnostics.some((d) => d.kind === "raw_arguments_parsed"));
 });
 
+test("parses GLM-style arguments tool input", () => {
+  const { response, diagnostics } = normalizeProviderResponse({
+    content: [{
+      type: "tool_use",
+      name: "run_command",
+      input: {
+        arguments: "{\"cmd\":\"node -e \\\"console.log(456)\\\"\"}",
+      },
+    } as any],
+    stopReason: "end_turn",
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+
+  const tool = response.content[0] as any;
+  assert.equal(response.stopReason, "tool_use");
+  assert.match(tool.id, /^toolu_repaired_0_/);
+  assert.equal(tool.name, "bash");
+  assert.deepEqual(tool.input, { command: "node -e \"console.log(456)\"" });
+  assert.ok(diagnostics.some((d) => d.kind === "arguments_parsed"));
+});
+
 test("generates stable tool ids and leaves unknown tools unguessed", () => {
   const raw = {
     content: [
